@@ -1,0 +1,24 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Segredos
+.env
+*.env
+
+# Cache Python
+__pycache__/
+*.pyc
+
+# Artefatos gerados
+meetings.pkl
+meeting_audio/
+transcript_*.pdf
+transcript_*.docx
+transcript_*.txt
+*.wav
+*.mp3
+
+# Editor/OS
+.vscode/
+.DS_Store

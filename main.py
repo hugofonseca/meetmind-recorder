@@ -19,9 +19,17 @@ from openai import AsyncOpenAI
 import json
 import pickle
 import time # Added for background processor
+from typing import Optional
+import queue
+import numpy as np
+import zipfile
+
+
 
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("discord.ext.voice_recv").setLevel(logging.INFO)
+logging.getLogger("discord.voice_state").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +44,16 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-openai_client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+openai_client = None
+openai_key = os.getenv("OPENAI_API_KEY")
+
+if openai_key:
+    openai_client = AsyncOpenAI(api_key=openai_key)
+    print("✅ OpenAI habilitado (Q&A disponível).")
+else:
+    print("ℹ️ OpenAI desabilitado (Q&A indisponível). Rode sem OPENAI_API_KEY.")
+
 
 
 model = WhisperModel("small", device="cpu", compute_type="int8")
@@ -164,9 +181,204 @@ def load_meetings():
         logger.error(f"Error loading meetings: {e}")
 
 
+class MixRecorder:
+    """
+    Grava um WAV 'mix' (somando áudio de múltiplos usuários).
+    - write() só coloca frames numa fila (rápido, thread-safe)
+    - um worker thread alinha frames por 'tick' (20ms) e mistura com numpy
+    """
+
+    def __init__(self, meeting, out_dir="meeting_audio", sample_rate=48000, channels=2, sampwidth=2, frame_ms=20):
+        self.meeting = meeting
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.sampwidth = sampwidth
+        self.frame_ms = frame_ms
+
+        os.makedirs(out_dir, exist_ok=True)
+        start_tag = meeting["start_time"].strftime("%Y%m%d_%H%M%S")
+        self.filepath = os.path.join(out_dir, f"meeting_mix_{start_tag}_{meeting['channel'].guild.id}.wav")
+
+        self._wf = wave.open(self.filepath, "wb")
+        self._wf.setnchannels(channels)
+        self._wf.setsampwidth(sampwidth)
+        self._wf.setframerate(sample_rate)
+
+        self._q = queue.Queue(maxsize=2000)
+        self._stop = threading.Event()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+
+        # Para alinhar frames aproximando para "ticks" de 20ms
+        self._t0 = time.monotonic()
+        self._tick_sec = frame_ms / 1000.0
+
+        # Buffer: tick_index -> {uid: pcm_bytes}
+        self._bucket = {}
+        self._last_flushed = -1
+
+        self._worker.start()
+
+    def push_frame(self, uid: int, pcm_bytes: bytes):
+        """Enfileira um frame PCM do usuário."""
+        if self._stop.is_set():
+            return
+        try:
+            now = time.monotonic()
+            tick = int((now - self._t0) / self._tick_sec)
+            self._q.put_nowait((tick, uid, pcm_bytes))
+        except queue.Full:
+            # Se lotar, dropa frame para não travar (melhor do que travar o bot)
+            pass
+
+    def close(self):
+        """Encerra thread e fecha o arquivo WAV."""
+        self._stop.set()
+        try:
+            self._worker.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            self._wf.close()
+        except Exception:
+            pass
+
+    def _mix_frames(self, frames: list[bytes]) -> bytes:
+        """
+        Mix simples:
+        - converte para int16
+        - soma com clamp (evita clipping)
+        """
+        if not frames:
+            # silêncio: 20ms stereo 48kHz => 960 samples/ch => 960*2ch = 1920 samples => *2 bytes = 3840 bytes
+            samples_per_ch = int(self.sample_rate * (self.frame_ms / 1000.0))
+            total_samples = samples_per_ch * self.channels
+            return (np.zeros(total_samples, dtype=np.int16)).tobytes()
+
+        arrays = [np.frombuffer(f, dtype=np.int16) for f in frames]
+        mix = np.sum(arrays, axis=0)
+
+        # clamp
+        mix = np.clip(mix, -32768, 32767).astype(np.int16)
+        return mix.tobytes()
+
+    def _flush_tick(self, tick: int):
+        """
+        Flush do tick: mistura todos frames disponíveis desse tick e grava no WAV.
+        """
+        per_user = self._bucket.pop(tick, {})
+        mixed = self._mix_frames(list(per_user.values()))
+        self._wf.writeframes(mixed)
+
+    def _run(self):
+        """
+        Worker: coleta frames, agrupa por tick e flush com pequeno atraso
+        (para permitir receber frames de múltiplos usuários do mesmo tick).
+        """
+        # atraso para "esperar" frames daquele tick chegarem
+        max_lag_ticks = 3  # ~60ms
+
+        while not self._stop.is_set():
+            try:
+                tick, uid, pcm = self._q.get(timeout=0.1)
+                self._bucket.setdefault(tick, {})[uid] = pcm
+
+                # Flush ticks antigos
+                flush_upto = tick - max_lag_ticks
+                while self._last_flushed < flush_upto:
+                    self._last_flushed += 1
+                    self._flush_tick(self._last_flushed)
+
+            except queue.Empty:
+                # Em idle, flush alguns ticks se houver pendência antiga
+                if self._bucket:
+                    oldest = min(self._bucket.keys())
+                    # se o oldest já é bem antigo, flush
+                    now_tick = int((time.monotonic() - self._t0) / self._tick_sec)
+                    if now_tick - oldest > max_lag_ticks:
+                        while self._last_flushed < oldest:
+                            self._last_flushed += 1
+                            self._flush_tick(self._last_flushed)
+
+        # Ao fechar, flush tudo que restou em ordem
+        if self._bucket:
+            for t in sorted(self._bucket.keys()):
+                self._flush_tick(t)
+            self._bucket.clear()
+
+
+
+
+
+
+async def fail_meeting_capture(guild_id: int, meeting: dict, reason: str, ctx: Optional[commands.Context] = None):
+    """
+    Encerra a reunião como NÃO CAPTURADA (fallback).
+    - Interrompe listener/sink
+    - Desconecta do voice
+    - Notifica no canal de transcrição e/ou canal do comando
+    - Remove do active_meetings e persiste (sem manter como meeting válida ativa)
+    """
+    try:
+        # Marca status (não persiste como "meeting válida", mas útil para logs locais)
+        meeting["capture_failed"] = True
+        meeting["capture_fail_reason"] = reason
+
+        # 1) Interromper sink/listener
+        sink = meeting.get("sink")
+        if sink and hasattr(sink, "cleanup"):
+            sink.cleanup()
+
+        vc = meeting.get("vc")
+        if vc:
+            # alguns builds expõem stop_listening/is_listening; se existir, use
+            if hasattr(vc, "is_listening") and vc.is_listening():
+                if hasattr(vc, "stop_listening"):
+                    try:
+                        vc.stop_listening()
+                    except Exception:
+                        pass
+
+            # 2) Desconectar da voz
+            try:
+                await vc.disconnect()
+            except Exception:
+                pass
+
+        # 3) Mensagem para o usuário (canal de transcrição e canal do comando)
+        stage_msg = (
+            "⚠️ **Falha na captura de áudio neste canal de voz (stream corrompido/Opus).**\n"
+            "✅ Para transcrição confiável, use o Stage: **📌 Meeting Room (Transcrição)**\n"
+            "➡️ Entre no Stage e rode novamente: `!start_meeting english`\n"
+        )
+
+        # Canal principal de aviso: transcription channel, se existir
+        ch = meeting.get("channel")
+        if ch:
+            try:
+                await ch.send(stage_msg)
+            except Exception:
+                pass
+
+        # Também avisa no canal onde o comando foi executado (se disponível)
+        if ctx and ctx.channel and (not ch or ctx.channel.id != ch.id):
+            try:
+                await ctx.send(stage_msg)
+            except Exception:
+                pass
+
+    finally:
+        # 4) Remover do active_meetings e salvar estado (não fica reunião ativa “válida”)
+        if guild_id in active_meetings:
+            active_meetings.pop(guild_id, None)
+        save_meetings()
+
+
+
 class TranscriptionSink(voice_recv.AudioSink):
     def __init__(self, meeting, bot_instance, language="auto"):
         super().__init__()
+        self.stopped = False  # When True, no further processing or sending occurs
+        self._bg_stop_event = threading.Event()  # Signal to stop background processor
         self.meeting = meeting
         self.bot = bot_instance
         self.language = language
@@ -176,18 +388,36 @@ class TranscriptionSink(voice_recv.AudioSink):
         self.pending_transcriptions = []  # Queue for pending transcriptions
         self.processing_lock = asyncio.Lock()  # Lock for sequential processing
         self.next_sequence = 0  # Sequence number for ordering
-        self.stopped = False  # When True, no further processing or sending occurs
-        self._bg_stop_event = threading.Event()  # Signal to stop background processor
         
+         # === MixRecorder (áudio mix) ===
+        os.makedirs("meeting_audio", exist_ok=True)
+        self.mix_path = os.path.join(
+            "meeting_audio",
+            f"meeting_mix_{self.meeting['start_time'].strftime('%Y%m%d_%H%M%S')}.wav"
+        )
+
+        self.mix_wav = wave.open(self.mix_path, "wb")
+        self.mix_wav.setnchannels(2)
+        self.mix_wav.setsampwidth(2)
+        self.mix_wav.setframerate(48000)
+
+        self.meeting["mix_audio_path"] = self.mix_path
+
+        logger.info(f"[MixRecorder] WAV mix criado em: {self.mix_path}")
+
         # Audio processing configuration - Optimized for low latency
-        self.buffer_duration = 2.0  # Reduced from 5.0s for faster response
-        self.min_buffer_size = 8000  # Reduced for faster processing
+        self.buffer_duration = 4.0  # Reduced from 5.0s for faster response
+        self.min_buffer_size = 16000  # Reduced for faster processing
         self.max_buffer_size = 24000  # Reduced to prevent delays
         self.force_process_interval = 1.5  # Force process every 1.5s if no natural triggers
         
         # Real-time mode settings
         self.real_time_mode = True  # Enable real-time processing
         self.streaming_mode = True  # Enable streaming transcriptions
+
+        self.filepath = self.mix_path  # compatibilidade: alguns trechos podem esperar .filepath
+        
+        
         
         # Start background processing timer
         self.start_background_processor()
@@ -268,19 +498,46 @@ class TranscriptionSink(voice_recv.AudioSink):
     def cleanup(self):
         # Signal all processors to stop and clear state
         self.stopped = True
-        self._bg_stop_event.set()
-        self.buffers.clear()
-        self.last_time.clear()
-        self.processing.clear()
-        self.pending_transcriptions.clear()
-    
+
+        # bg stop event pode não existir se init falhar
+        try:
+            if hasattr(self, "_bg_stop_event") and self._bg_stop_event:
+                self._bg_stop_event.set()
+        except Exception:
+            pass
+        
+        # fecha wav se existir
+        try:
+            if hasattr(self, "mix_wav") and self.mix_wav:
+                self.mix_wav.close()
+                logger.info(f"[MixRecorder] WAV mix fechado: {getattr(self, 'mix_path', 'sem caminho')}")
+        except Exception as e:
+            logger.error(f"[MixRecorder] Erro ao fechar WAV mix: {e}")
+
+        # limpa estruturas (se existirem)
+        try:
+            self.buffers.clear()
+            self.last_time.clear()
+            self.processing.clear()
+            self.pending_transcriptions.clear()
+        except Exception:
+            pass
+
+
     def write(self, user, data: voice_recv.VoiceData):
         """Called by voice_recv when audio arrives (must be sync)."""
         if self.stopped:
             return
+                
         if not data.pcm or not user:
             return
-            
+                    
+        # grava o mix (simples: append do PCM recebido)
+        try:
+            self.mix_wav.writeframes(data.pcm)
+        except Exception as e:
+            logger.error(f"[MixRecorder] Erro ao gravar WAV mix: {e}")
+        
         uid = user.id
         
         # Add audio to user's buffer
@@ -302,20 +559,22 @@ class TranscriptionSink(voice_recv.AudioSink):
             should_process = True
         
         if should_process:
-            # Schedule processing
+            # Schedule processing (não bloquear a thread do voice_recv)
             def schedule_transcription():
                 try:
                     loop = self.bot.loop
                     if loop and not loop.is_closed():
                         asyncio.run_coroutine_threadsafe(
-                            self.process_user_audio(uid, now), 
+                            self.process_user_audio(uid, now),
                             loop
                         )
                 except Exception as e:
                     logger.error(f"Error scheduling transcription: {e}")
                     self.processing[uid] = False
-            
+
             threading.Thread(target=schedule_transcription, daemon=True).start()
+
+
     
     async def process_audio_async(self, transcription_task):
         """Process audio data asynchronously with proper ordering."""
@@ -419,15 +678,15 @@ class TranscriptionSink(voice_recv.AudioSink):
             segments, info = model.transcribe(
                 wav_buffer, 
                 language=language_code,
-                vad_filter=True,
+                vad_filter=False,
                 vad_parameters=dict(min_silence_duration_ms=500),
                 word_timestamps=True,
-                condition_on_previous_text=True,
+                condition_on_previous_text=False,
                 compression_ratio_threshold=2.4,
                 log_prob_threshold=-1.0,
                 no_speech_threshold=0.6,
-                temperature=0.0,
-                beam_size=5
+                temperature=0.2,
+                beam_size=3
             )
             
             text_segments = []
@@ -799,8 +1058,34 @@ async def start_meeting(ctx, *, language:str|None=None):
     # Set up audio transcription with language support
     sink = TranscriptionSink(meeting, bot, language_code)
     meeting["sink"] = sink  # Store reference for cleanup
-    voice_client.listen(sink)
-    
+    def after_listen(err: Exception | None):
+    # O callback after pode ocorrer fora do loop async.
+    # Então agendamos uma corrotina no loop do bot.
+        if err is None:
+            return
+
+        # Detecta o caso específico: OpusError corrupted stream
+        if isinstance(err, discord.opus.OpusError) and "corrupted stream" in str(err).lower():
+            loop = bot.loop
+            if loop and not loop.is_closed():
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(
+                        fail_meeting_capture(
+                            guild_id=guild_id,
+                            meeting=meeting,
+                            reason="OpusError: corrupted stream",
+                            ctx=ctx
+                        )
+                    )
+                )
+            return
+
+        # Outros erros: registra, e opcionalmente também encerra
+        logger.error(f"Voice listen error (non-opus): {err}")
+
+    # listen com fallback
+    voice_client.listen(sink, after=after_listen)        
+        
     await ctx.send(f"✅ Meeting started! Live transcriptions in **{language_display}** will appear in {text_channel.mention}")
 
 @bot.command(name='end_meeting', aliases=['end', 'stop_meeting'])
@@ -814,6 +1099,8 @@ async def end_meeting(ctx, format_type="pdf"):
     
     meeting = active_meetings.pop(guild_id)
     save_meetings() # Save meeting before it's removed
+    # define canal cedo para evitar UnboundLocalError
+    channel = meeting.get("channel") or ctx.channel
     
     try:
         # Clean up the sink
@@ -824,6 +1111,14 @@ async def end_meeting(ctx, format_type="pdf"):
         if meeting["vc"]:
             await meeting["vc"].disconnect()
         
+        mix_path = meeting.get("mix_audio_path")
+        if mix_path and os.path.exists(mix_path):
+            await channel.send(
+                f"🎧 **Áudio completo (mix) salvo localmente**:\n`{mix_path}`\n"
+            )
+        else:
+            await channel.send("⚠️ Não encontrei o arquivo de áudio mix no disco.")
+       
         # Generate transcript document
         if meeting["log"]:
             # Validate format type
@@ -832,8 +1127,7 @@ async def end_meeting(ctx, format_type="pdf"):
             
             filename = await create_transcript_document(meeting["log"], format_type.lower())
             
-            # Send transcript to the channel - use fallback if meeting channel is not available
-            channel = meeting["channel"]
+
             if not channel:
                 # If meeting channel is not available (e.g., after bot restart), use the command channel
                 channel = ctx.channel
