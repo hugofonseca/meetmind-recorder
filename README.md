@@ -1,6 +1,6 @@
 # meetmind-recorder (Windows)
 
-Bot de transcrição para reuniões no Discord (Windows) com:
+Bot de gravação e transcrição para reuniões no Discord (Windows) com:
 - Transcrição em tempo real
 - Gravação local de áudio (WAV)
 - Geração de transcript (PDF/DOCX/TXT)
