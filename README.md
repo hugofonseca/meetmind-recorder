@@ -21,66 +21,77 @@ Bot de transcrição para reuniões no Discord (Windows) com:
 ## 🚀 Setup rápido (PowerShell)
 
 ### 1) Clonar o repositório
+'''
 git clone https://github.com/hugofonseca/meetmind-recorder.git
 cd meetmind-recorder
-
+'''
 ### 2) Criar e ativar ambiente virtual
+'''
 py -3.11 -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 . .\.venv\Scripts\Activate.ps1
-'''após o comando acima, o terminal deverá acusar que o venv está ativdado'''
+'''
+- após o comando acima, o terminal deverá acusar que o venv está ativdado
 
 ### 3) Instalar dependências (dentro do venv)
+'''
 python -m pip install --upgrade pip
 pip install -r requirements.lock.txt
-
+'''
 ### 4) Informar DISCORD_TOKEN
-Copiar token no site do discord e colar dentro do arquivo
+- Copiar token no site do discord e colar dentro do arquivo
 .env.example
 
 ### 5) Rodar o bot
+'''
 python -u main.py
 
 ---
 
-🎙️ Como usar (recomendado)
+## 🎙️ Como usar (recomendado)
 
-Crie/Use um Stage Channel no servidor:
+### 1) Crie/Use um Stage Channel no servidor:
 
-Nome sugerido: 📌 Meeting Room (Transcrição)
+- Nome sugerido: 📌 Meeting Room (Transcrição)
 
+- Entre no chat de texto do Stage e rode:
+'''
+!start_meeting portuguese
 
-Entre no Stage
-Rode: !start_meeting portuguese
-Fale normalmente
-Finalize: !end_meeting
+- Fale normalmente e, para finalizar, rode:
+'''
+!end_meeting
 
-✅ O bot cria um arquive .wav da gravação da reunião dentro da subpasta meeting_audio. Além disso, no servidor do Discord, ele cria um canal de texto meeting-transcription-..., publica transcrições simultâneas. Ao finalizar a reunião, o bot envia o arquivo final da transcrição nesse novo canal.
+✅ O bot cria um arquive .wav da gravação da reunião dentro da subpasta meeting_audio. Além disso, no servidor do Discord, ele cria um canal de texto meeting-transcription-..., publica transcrições simultâneas. Quando finalizar a reunião, o bot envia o arquivo final da transcrição para download no canal meeting-transcription criado.
 
-🧩 Comandos principais
+### 2) 🧩 Comandos
 
-!start_meeting [language] — inicia a reunião/transcrição
-!end_meeting [pdf|docx|txt] — encerra e gera o transcript
-!meeting_status — status da reunião
-!meeting_help — ajuda
+| Command | Description | Usage Example |
+|---------|-------------|---------------|
+| `!start_meeting [language]` | Start a new meeting with transcription | `!start_meeting english`<br>`!start_meeting arabic`<br>`!start_meeting auto` |
+| `!end_meeting [format]` | End meeting and generate transcript | `!end_meeting pdf`<br>`!end_meeting docx` |
+| `!ask <question>` | Ask AI about meeting content | `!ask What did John say about the budget?` |
+| `!meeting_status` | Check current meeting status | `!meeting_status` |
+| `!languages` | Show supported languages | `!languages` |
+| `!meeting_help` | Display help information | `!meeting_help` |
 
-📌 Observações importantes
+### 3) 📌 Observações importantes
 
-O bot foi otimizado para funcionar com Stage Channel.
-Em canais de voz normais, a captura pode ser instável; o bot possui fallback automático orientando o Stage.
+- O bot foi otimizado para funcionar com Stage Channel.
+- Em canais de voz normais, a captura pode ser instável; o bot possui fallback automático orientando o Stage.
 
-📁 Saídas geradas localmente
+### 4) 📁 Saídas geradas localmente
 
-meeting_audio/ → gravações WAV locais
-transcript_*.pdf|docx|txt → arquivos de transcript gerados
+- meeting_audio/ → gravações WAV locais
+- transcript_*.pdf|docx|txt → arquivos de transcript gerados
 
 Essas pastas/arquivos são ignorados pelo .gitignore.
 
-🧯 Troubleshooting
-Veja:
-docs/windows-setup.md
-docs/troubleshooting.md
+### 5) 🧯 Troubleshooting
+Veja, dentro da subpasta docs, os arquivos:
+- windows-setup.md
+- troubleshooting.md
 
-📜 Licença & créditos
-Projeto empacotado/documentado para execução local no Windows. 
-Inclui melhorias operacionais (Stage recomendado, fallback e gravação local).
+### 6) 📜 Licença & créditos
+- Projeto empacotado/documentado para execução local no Windows. 
+- Inclui melhorias operacionais (Stage recomendado, fallback e gravação local).
