@@ -1,24 +1,8 @@
-# Ambiente virtual
-.venv/
-venv/
-
-# Segredos
 .env
-*.env
-
-# Cache Python
+.venv/
 __pycache__/
 *.pyc
-
-# Artefatos gerados
-meetings.pkl
 meeting_audio/
-transcript_*.pdf
-transcript_*.docx
-transcript_*.txt
+meetings.pkl
 *.wav
-*.mp3
-
-# Editor/OS
-.vscode/
-.DS_Store
+*.log
