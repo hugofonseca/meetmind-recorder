@@ -1,31 +1,30 @@
 FROM python:3.11-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
+# System packages: Opus for voice capture, ffmpeg for audio compression
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libopus0 \
     libopus-dev \
     libffi-dev \
     libnacl-dev \
     python3-dev \
     gcc \
+    git \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+COPY main.py .
+COPY .env* ./
 
-# Create a non-root user
+# Persistent output directory for WAV files
+RUN mkdir -p meeting_audio
+
+# Non-root user for security
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
 
-# Run the bot
-CMD ["python", "MeetMind_local.py"] 
+CMD ["python", "main.py"]
