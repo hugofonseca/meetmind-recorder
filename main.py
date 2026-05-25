@@ -1,15 +1,36 @@
 import discord
-from discord.ext import commands, voice_recv
-import datetime
+import datetime as dt
 import os
+import json
 import wave
 import asyncio
 import pickle
 import ffmpeg
-from typing import Optional
-from dotenv import load_dotenv
+import platform
+import sys
+import subprocess
 import logging
+from typing import Optional
+from discord.ext import commands, voice_recv
+from dotenv import load_dotenv
 
+
+
+
+from pathlib import Path
+
+BASE_DIR = Path("meeting_audio")
+
+def create_meeting_structure(start_time: dt.datetime) -> tuple[str, str]:
+    meeting_id = start_time.strftime("%Y%m%d_%H%M%S")
+    meeting_dir = BASE_DIR / "meetings" / meeting_id
+
+    (meeting_dir / "audio").mkdir(parents=True, exist_ok=True)
+    (meeting_dir / "events").mkdir(parents=True, exist_ok=True)
+    (meeting_dir / "chunks").mkdir(parents=True, exist_ok=True)  # opcional p/ futuro
+
+    # retornando strings (melhor p/ pickle/serialização)
+    return meeting_id, str(meeting_dir)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -20,6 +41,26 @@ logging.getLogger("discord.voice_state").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Manifest schema
+# ---------------------------------------------------------------------------
+MANIFEST_SCHEMA_VERSION = "1.0"
+
+# ---------------------------------------------------------------------------
+# Audio encoding config (master raw.ogg)
+# ---------------------------------------------------------------------------
+RAW_OPUS_TARGET_KBPS = 96           # alvo do bitrate do raw.ogg (alta qualidade)
+RAW_OPUS_VBR = True                 # você está usando VBR
+RAW_OPUS_APPLICATION = "voip"       # você está usando -application voip
+RAW_CONTAINER = "ogg"
+RAW_CODEC = "opus"
+
+# ---------------------------------------------------------------------------
+# Debug flags
+# ---------------------------------------------------------------------------
+INCLUDE_DEBUG_PATHS = False  # deixe False por padrão (evita expor paths absolutos)
+
 
 # ---------------------------------------------------------------------------
 # Bot setup
@@ -45,11 +86,14 @@ def save_meetings() -> None:
     serialisable = {}
     for guild_id, meeting in active_meetings.items():
         serialisable[guild_id] = {
-            "start_time":     meeting["start_time"],
-            "started_by":     meeting["started_by"],
-            "channel_id":     meeting.get("channel_id"),
-            "mix_audio_path": meeting.get("mix_audio_path"),
+            "start_time": meeting["start_time"],
+            "started_by": meeting["started_by"],
+            "channel_id": meeting.get("channel_id"),
+            "meeting_id": meeting.get("meeting_id"),
+            "meeting_dir": meeting.get("meeting_dir"),
+            "raw_audio_path": meeting.get("raw_audio_path"),
         }
+
     try:
         with open(MEETINGS_FILE, "wb") as f:
             pickle.dump(serialisable, f)
@@ -64,43 +108,349 @@ def load_meetings() -> None:
     try:
         with open(MEETINGS_FILE, "rb") as f:
             saved: dict = pickle.load(f)
+
         for guild_id, data in saved.items():
+            start_time = data["start_time"]
+            if isinstance(start_time, dt.datetime) and start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=dt.timezone.utc)
+
+            # ✅ migração: se raw_audio_path não existir no pkl antigo, usa mix_audio_path
+            raw_audio_path = data.get("raw_audio_path") or data.get("mix_audio_path")
+
             active_meetings[guild_id] = {
                 "channel":        None,
                 "channel_id":     data.get("channel_id"),
                 "vc":             None,
                 "sink":           None,
-                "start_time":     data["start_time"],
+                "start_time":     start_time,
                 "started_by":     data["started_by"],
-                "mix_audio_path": data.get("mix_audio_path"),
+                "meeting_id":     data.get("meeting_id"),
+                "meeting_dir":    data.get("meeting_dir"),
+                "raw_audio_path": raw_audio_path,  # ✅ só raw no runtime
             }
+
         logger.info(f"[load_meetings] Loaded {len(saved)} meeting(s) from disk.")
     except Exception as e:
         logger.error(f"[load_meetings] Failed: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Audio sink — captures PCM and writes a stereo 48 kHz WAV file
+# Audio sink ogg
 # ---------------------------------------------------------------------------
-class AudioSink(voice_recv.AudioSink):
-    """Writes every incoming voice packet to a single mixed WAV file."""
+class AudioSinkOgg(voice_recv.AudioSink):
+    """Recebe PCM e grava diretamente em OGG/Opus (qualidade alta) via FFmpeg."""
 
     def __init__(self, meeting: dict):
         super().__init__()
         self.stopped = False
         self.meeting = meeting
 
-        os.makedirs("meeting_audio", exist_ok=True)
-        timestamp = meeting["start_time"].strftime("%Y%m%d_%H%M%S")
-        self.mix_path = os.path.join("meeting_audio", f"meeting_{timestamp}.wav")
+        meeting["bitrate_target_kbps"] = RAW_OPUS_TARGET_KBPS        
+        meeting["encoding_application"] = RAW_OPUS_APPLICATION
+        meeting["encoding_vbr"] = RAW_OPUS_VBR
+        meeting["capture_started_at_dt"] = utc_now_dt()
+        meeting["capture_started_at"] = to_utc_z(meeting["capture_started_at_dt"])
 
-        self.mix_wav = wave.open(self.mix_path, "wb")
-        self.mix_wav.setnchannels(2)
-        self.mix_wav.setsampwidth(2)
-        self.mix_wav.setframerate(48000)
+        ogg_path = meeting["raw_audio_path"]
+        os.makedirs(os.path.dirname(ogg_path), exist_ok=True)
 
-        meeting["mix_audio_path"] = self.mix_path
-        logger.info(f"[AudioSink] Recording started: {self.mix_path}")
+        # PCM vindo do voice_recv é compatível com o WAV atual: s16le, 48kHz, 2 canais.
+        # Como é reunião mesclada, fazemos downmix para MONO e usamos bitrate ALTO (96k).
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "s16le",
+            "-ar", "48000",
+            "-ac", "2",
+            "-i", "pipe:0",
+
+            "-ac", "1",                  # ✅ downmix mono (ideal p/ reunião mesclada)
+            "-c:a", "libopus",
+            "-b:a", f"{RAW_OPUS_TARGET_KBPS}k",  # ✅ usando a constante
+            "-vbr", "on",
+            "-application", RAW_OPUS_APPLICATION,
+
+            ogg_path
+        ]
+
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        logger.info(f"[AudioSinkOgg] Recording started: {ogg_path}")
+
+    def wants_opus(self) -> bool:
+        return False  # queremos PCM
+
+    def write(self, user, data: voice_recv.VoiceData) -> None:
+        if self.stopped or not data.pcm or not user:
+            return
+        try:
+            if self.proc and self.proc.stdin:
+                self.proc.stdin.write(data.pcm)
+        except BrokenPipeError:
+            logger.error("[AudioSinkOgg] FFmpeg pipe closed unexpectedly.")
+            self.stopped = True
+        except Exception as e:
+            logger.error(f"[AudioSinkOgg] Write error: {e}")
+
+
+    def cleanup(self) -> None:
+        self.stopped = True
+        try:
+            if self.proc and self.proc.stdin:
+                self.proc.stdin.close()
+            if self.proc:
+                self.proc.wait(timeout=10)
+            self.meeting["capture_ended_at_dt"] = utc_now_dt()
+            self.meeting["capture_ended_at"] = to_utc_z(self.meeting["capture_ended_at_dt"])
+            self.meeting["capture_duration_sec"] = (
+                self.meeting["capture_ended_at_dt"] - self.meeting["capture_started_at_dt"]
+            ).total_seconds()
+
+
+            logger.info(f"[AudioSinkOgg] OGG closed: {self.meeting.get('raw_audio_path')}")
+        except Exception as e:
+            logger.error(f"[AudioSinkOgg] Cleanup error: {e}")
+            try:
+                if self.proc:
+                    self.proc.terminate()
+            except Exception:
+                pass
+
+
+def format_hms(seconds: float) -> str:
+    """Converte segundos para HH:MM:SS (arredondando para o segundo mais próximo)."""
+    if seconds is None:
+        return None
+    total = int(round(seconds))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def utc_now_dt() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+def to_utc_z(dt_value: dt.datetime) -> str:
+    """Converte datetime para ISO8601 em UTC com sufixo Z."""
+    if dt_value is None:
+        return None
+    if dt_value.tzinfo is None:
+        dt_value = dt_value.replace(tzinfo=dt.timezone.utc)
+    else:
+        dt_value = dt_value.astimezone(dt.timezone.utc)
+    return dt_value.isoformat().replace("+00:00", "Z")
+
+def utc_now_z() -> str:
+    return utc_now_dt().isoformat().replace("+00:00", "Z")
+
+def ffprobe_format_info(path: str) -> dict:
+    """
+    Retorna JSON do ffprobe contendo 'format' e 'streams' do arquivo.
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-print_format", "json",
+        "-show_format",
+        "-show_streams",
+        path,
+    ]
+    out = subprocess.check_output(cmd, text=True, encoding="utf-8", errors="replace")
+    return json.loads(out)
+
+def probe_audio_info(path: str) -> dict:
+    """
+    Extrai metadados úteis do áudio:
+    - duration_sec
+    - bitrate_bps (preferência: format.bit_rate; fallback: size/duration)
+    - codec, channels, sample_rate_hz, size_bytes
+    """
+    info = {
+        "duration_sec": None,
+        "duration_hms": None,
+        "bitrate_bps": None,
+        "bitrate_kbps": None,
+        "codec": None,
+        "channels": None,
+        "sample_rate_hz": None,
+        "size_bytes": None,
+    }
+
+    if not path or not os.path.exists(path):
+        return info
+
+    info["size_bytes"] = os.path.getsize(path)
+
+    try:
+        data = ffprobe_format_info(path)
+
+        fmt = data.get("format") or {}
+        streams = data.get("streams") or []
+
+        # Duração (segundos)
+        dur = fmt.get("duration")
+        if dur is not None:
+            info["duration_sec"] = float(dur)
+        
+        if info["duration_sec"] is not None:
+            info["duration_hms"] = format_hms(info["duration_sec"])
+        else:
+            info["duration_hms"] = None
+
+        # Bitrate no nível do container (pode existir mesmo quando stream.bit_rate é N/A)
+        br = fmt.get("bit_rate")
+        if br is not None:
+            try:
+                info["bitrate_bps"] = int(br)
+            except Exception:
+                pass
+
+        # Pegar stream de áudio principal
+        audio_stream = None
+        for s in streams:
+            if (s.get("codec_type") == "audio"):
+                audio_stream = s
+                break
+
+        if audio_stream:
+            info["codec"] = audio_stream.get("codec_name")
+            ch = audio_stream.get("channels")
+            if ch is not None:
+                info["channels"] = int(ch)
+
+            sr = audio_stream.get("sample_rate")
+            if sr is not None:
+                try:
+                    info["sample_rate_hz"] = int(sr)
+                except Exception:
+                    pass
+
+        # Fallback: bitrate médio calculado (size_bytes * 8 / duration_sec)
+        if info["bitrate_bps"] is None and info["duration_sec"]:
+            info["bitrate_bps"] = int((info["size_bytes"] * 8) / info["duration_sec"])
+
+        if info["bitrate_bps"] is not None:
+            info["bitrate_kbps"] = round(info["bitrate_bps"] / 1000, 1)
+
+        return info
+
+    except Exception as e:
+        # Se o ffprobe falhar, ainda dá para calcular bitrate médio se tiver duração depois (mas aqui faltará duração)
+        logger.warning(f"[probe_audio_info] ffprobe failed for {path}: {e}")
+        return info
+
+def get_git_commit_short() -> str | None:
+    """Retorna commit curto do git (se repo tiver git disponível)."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+def get_recorder_info() -> dict:
+    """Metadados do serviço recorder para rastreabilidade."""
+    return {
+        "service": "meetmind-recorder",
+        "git_commit": get_git_commit_short(),
+        "host": platform.node(),
+        "python": sys.version.split()[0],
+        "timestamp_utc": utc_now_z(),
+    }
+
+def create_manifest(meeting: dict, audio_info: dict) -> None:
+    """Cria manifest.json dentro da pasta da reunião, incluindo auditoria e rastreabilidade."""
+    meeting_dir = meeting["meeting_dir"]
+
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,  # ✅ NOVO
+        "meeting_id": meeting["meeting_id"],
+        "created_at": to_utc_z(meeting["start_time"]),
+        "started_at": to_utc_z(meeting["start_time"]),
+        "ended_at": meeting.get("ended_at"),
+        "source": "discord",
+        "audio": {
+            "raw": "audio/raw.ogg",
+
+            # ----- medidos via ffprobe / cálculo -----
+            "duration_sec": audio_info.get("duration_sec"),
+            "duration_hms": audio_info.get("duration_hms"),
+            "bitrate_bps": audio_info.get("bitrate_bps"),
+            "bitrate_kbps": audio_info.get("bitrate_kbps"),
+            "size_bytes": audio_info.get("size_bytes"),
+            "codec": audio_info.get("codec"),
+            "channels": audio_info.get("channels"),
+            "sample_rate_hz": audio_info.get("sample_rate_hz"),
+
+            # ----- configurado (auditoria) -----
+            "bitrate_target_kbps": meeting.get("bitrate_target_kbps", RAW_OPUS_TARGET_KBPS),
+
+            "capture_started_at": meeting.get("capture_started_at"),
+            "capture_ended_at": meeting.get("capture_ended_at"),
+            "capture_duration_sec": meeting.get("capture_duration_sec"),
+
+            # ✅ NOVO: como o áudio foi gerado
+            "encoding": {
+                "container": RAW_CONTAINER,
+                "codec": RAW_CODEC,
+                "vbr": meeting.get("encoding_vbr", RAW_OPUS_VBR),
+                "application": meeting.get("encoding_application", RAW_OPUS_APPLICATION),
+                "bitrate_target_kbps": meeting.get("bitrate_target_kbps", RAW_OPUS_TARGET_KBPS),
+            },
+        },
+
+        # ✅ NOVO: rastreabilidade do recorder
+        "recorder": get_recorder_info(),
+
+        "status": {
+            "audio_ready": True,
+            "transcription_ready": False,
+            "llm_processed": False
+        }
+    }
+
+    path = os.path.join(meeting_dir, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+
+def emit_audio_ready(meeting: dict) -> None:
+    """Emite um evento local para sinalizar que a transcrição pode começar."""
+    meeting_dir = meeting["meeting_dir"]
+
+    event = {
+        "event": "audio_ready",
+        "meeting_id": meeting["meeting_id"],
+        "manifest": "manifest.json"
+    }
+
+    path = os.path.join(meeting_dir, "events", "audio_ready.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(event, f, indent=2, ensure_ascii=False)
+
+def finalize_meeting_files(meeting: dict) -> None:
+    """Finaliza o pacote da reunião (manifest + evento), enriquecendo com duração e bitrate médio."""
+    
+    raw_path = meeting.get("raw_audio_path")
+
+    audio_info = probe_audio_info(raw_path) if raw_path else {}
+
+    create_manifest(meeting, audio_info)
+    emit_audio_ready(meeting)
+
+
+'''
+def finalize_meeting_files(meeting: dict) -> None:
+    """Finaliza o pacote da reunião (manifest + evento)."""
+    create_manifest(meeting)
+    emit_audio_ready(meeting)
 
     # voice_recv protocol -------------------------------------------------
 
@@ -123,68 +473,7 @@ class AudioSink(voice_recv.AudioSink):
                 logger.info(f"[AudioSink] WAV closed: {self.mix_path}")
         except Exception as e:
             logger.error(f"[AudioSink] Cleanup error: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Compress WAV → OGG and upload to Discord
-# ---------------------------------------------------------------------------
-async def compress_and_upload(
-    channel: discord.TextChannel,
-    wav_path: str,
-    duration: str,
-) -> None:
-    """Convert WAV to OGG Opus and send as a Discord attachment.
-
-    Falls back to the raw WAV if ffmpeg conversion fails.
-    Handles Discord's 8 MB file-size limit gracefully.
-    The OGG is deleted after upload; the WAV is kept as a local backup.
-    """
-    ogg_path = wav_path.replace(".wav", ".ogg")
-    upload_path = wav_path  # default: raw WAV if compression fails
-
-    # Compress ---------------------------------------------------------------
-    try:
-        (
-            ffmpeg
-            .input(wav_path)
-            .output(ogg_path, acodec="libopus", ab="64k", ar=48000)
-            .overwrite_output()
-            .run(quiet=True)
-        )
-        upload_path = ogg_path
-        logger.info(f"[compress_and_upload] OGG created: {ogg_path}")
-    except Exception as e:
-        logger.warning(f"[compress_and_upload] ffmpeg failed, falling back to WAV: {e}")
-
-    # Upload -----------------------------------------------------------------
-    try:
-        filename = os.path.basename(upload_path)
-        with open(upload_path, "rb") as f:
-            await channel.send(
-                f"✅ **Meeting ended!** ⏱️ Duration: {duration}\n"
-                f"🎙️ Download your recording below:",
-                file=discord.File(f, filename=filename),
-            )
-        logger.info(f"[compress_and_upload] Uploaded: {filename}")
-    except discord.HTTPException as e:
-        if e.status == 413:  # Payload Too Large
-            await channel.send(
-                f"✅ Meeting ended (duration: {duration}).\n"
-                f"⚠️ Audio file too large to upload to Discord.\n"
-                f"📁 Saved locally at: `{wav_path}`"
-            )
-            logger.warning(f"[compress_and_upload] File too large for Discord: {upload_path}")
-        else:
-            logger.error(f"[compress_and_upload] HTTP error uploading file: {e}")
-            raise
-    finally:
-        # Always remove the OGG after upload attempt; keep WAV as local backup
-        if os.path.exists(ogg_path):
-            try:
-                os.remove(ogg_path)
-            except Exception as e:
-                logger.warning(f"[compress_and_upload] Could not delete OGG: {e}")
-
+'''
 
 # ---------------------------------------------------------------------------
 # Fallback handler — corrupted Opus stream
@@ -255,14 +544,23 @@ async def auto_end_meeting(guild_id: int) -> None:
         if vc:
             await vc.disconnect()
 
-        mix_path = meeting.get("mix_audio_path")
-        channel = meeting.get("channel")
-        duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
 
+        ended_dt = utc_now_dt()  # aware UTC
+        meeting["ended_at"] = ended_dt.isoformat().replace("+00:00", "Z")
+        duration = str(ended_dt - meeting["start_time"])
+
+
+        audio_path = meeting.get("raw_audio_path")
+
+        channel = meeting.get("channel")
         if channel:
-            if mix_path and os.path.exists(mix_path):
-                await channel.send("⏳ Everyone left — processing and uploading audio...")
-                await compress_and_upload(channel, mix_path, duration)
+            if audio_path and os.path.exists(audio_path):
+                finalize_meeting_files(meeting)
+                await channel.send(
+                    f"🔇 Everyone left — meeting ended (duration: {duration}).\n"
+                    f"📁 Áudio salvo localmente.\n"
+                    f"🧾 Manifest gerado."
+                )
             else:
                 await channel.send("🔇 Meeting ended automatically. Audio file not found.")
 
@@ -340,13 +638,18 @@ async def start_meeting(ctx: commands.Context) -> None:
         "channel_id":     ctx.channel.id,
         "vc":             voice_client,
         "sink":           None,
-        "start_time":     datetime.datetime.now(),
+        "start_time": utc_now_dt(),
         "started_by":     ctx.author.id,
-        "mix_audio_path": None,
     }
     active_meetings[guild_id] = meeting
 
-    sink = AudioSink(meeting)
+    meeting_id, meeting_dir = create_meeting_structure(meeting["start_time"])
+
+    meeting["meeting_id"] = meeting_id
+    meeting["meeting_dir"] = meeting_dir
+    meeting["raw_audio_path"] = os.path.join(meeting_dir, "audio", "raw.ogg")
+
+    sink = AudioSinkOgg(meeting)
     meeting["sink"] = sink
 
     def after_listen(err: Optional[Exception]) -> None:
@@ -392,12 +695,18 @@ async def end_meeting(ctx: commands.Context) -> None:
         if vc:
             await vc.disconnect()
 
-        mix_path = meeting.get("mix_audio_path")
-        duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
+        meeting["ended_at"] = utc_now_z()
 
-        if mix_path and os.path.exists(mix_path):
-            await ctx.send("⏳ Processing and uploading audio...")
-            await compress_and_upload(ctx.channel, mix_path, duration)
+        audio_path = meeting.get("raw_audio_path")
+        duration = str(utc_now_dt() - meeting["start_time"]).split(".")[0]
+
+        if audio_path and os.path.exists(audio_path):
+            finalize_meeting_files(meeting)
+            await ctx.send(
+                f"✅ Meeting ended (duration: {duration}).\n"
+                f"📁 Áudio salvo localmente em: `{audio_path}`\n"
+                f"🧾 Manifest: `{os.path.join(meeting['meeting_dir'], 'manifest.json')}`"
+            )
         else:
             await ctx.send(f"✅ Meeting ended (duration: {duration}). Audio file not found.")
 
@@ -415,15 +724,15 @@ async def meeting_status(ctx: commands.Context) -> None:
 
     if guild_id in active_meetings:
         meeting = active_meetings[guild_id]
-        duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
+        duration = str(utc_now_dt() - meeting["start_time"]).split(".")[0]
 
         embed = discord.Embed(title="🎙️ Active Meeting", color=0x00FF00)
         embed.add_field(name="Status",     value="🟢 **RECORDING**",            inline=True)
         embed.add_field(name="Duration",   value=f"⏱️ {duration}",              inline=True)
         embed.add_field(name="Started by", value=f"<@{meeting['started_by']}>", inline=True)
 
-        mix_path = meeting.get("mix_audio_path") or "pending…"
-        embed.add_field(name="Audio file", value=f"`{mix_path}`", inline=False)
+        audio_path = meeting.get("raw_audio_path") or "pending…"
+        embed.add_field(name="Audio file", value=f"`{audio_path}`", inline=False)
         embed.set_footer(text="Use !end_meeting to stop and receive the audio file.")
         await ctx.send(embed=embed)
     else:
@@ -466,25 +775,34 @@ async def restore_meeting(ctx: commands.Context) -> None:
             return
 
         data = saved[guild_id]
-        age = (datetime.datetime.now() - data["start_time"]).total_seconds()
+        
+        start_time = data["start_time"]
+        if isinstance(start_time, dt.datetime) and start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=dt.timezone.utc)
+
+        age = (utc_now_dt() - start_time).total_seconds()
         if age > 86400:
             await ctx.send("❌ Saved meeting has expired (older than 24 hours).")
             return
+
+        raw_audio_path = data.get("raw_audio_path") or data.get("mix_audio_path")
 
         active_meetings[guild_id] = {
             "channel":        ctx.channel,
             "channel_id":     ctx.channel.id,
             "vc":             None,
             "sink":           None,
-            "start_time":     data["start_time"],
+            "start_time":     start_time,          # ✅ normalizado
             "started_by":     data["started_by"],
-            "mix_audio_path": data.get("mix_audio_path"),
+            "meeting_id":     data.get("meeting_id"),
+            "meeting_dir":    data.get("meeting_dir"),
+            "raw_audio_path": raw_audio_path,      # ✅ só raw
         }
 
-        mix_path = data.get("mix_audio_path") or "unknown"
+        audio_path = raw_audio_path or "unknown"
         await ctx.send(
             f"✅ Meeting metadata restored.\n"
-            f"🎙️ Audio file: `{mix_path}`\n"
+            f"🎙️ Audio file: `{audio_path}`\n"
             f"⚠️ Live recording cannot be resumed after a restart."
         )
         save_meetings()
