@@ -1,4 +1,4 @@
-MeetMind — Atualização de operação
+MeetMind — Atualização de operação!
 Este projeto foi reorganizado para funcionar como uma suíte com três partes: um bot do Discord para gravar reuniões, uma API Flask para transcrever e gerar atas, e um dashboard Flutter para visualizar e editar resultados.
 
 Estrutura atual
