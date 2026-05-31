@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "meeting_id": "20260525_020344",
+  "created_at": "2026-05-25T02:03:44.377550+00:00",
+  "started_at": "2026-05-25T02:03:44.377550Z",
+  "ended_at": "2026-05-25T02:05:38.519647Z",
+  "source": "discord",
+  "audio": {
+    "raw": "audio/raw.ogg",
+    "duration_sec": 105.4865,
+    "duration_hms": "00:01:45",
+    "bitrate_bps": 98837,
+    "bitrate_kbps": 98.8,
+    "size_bytes": 1303252,
+    "codec": "opus",
+    "channels": 1,
+    "sample_rate_hz": 48000,
+    "bitrate_target_kbps": 96,
+    "encoding": {
+      "container": "ogg",
+      "codec": "opus",
+      "vbr": true,
+      "application": "voip",
+      "bitrate_target_kbps": 96
+    }
+  },
+  "recorder": {
+    "service": "meetmind-recorder",
+    "git_commit": "f990cfc",
+    "host": "DESKTOP-IF6LFCE",
+    "python": "3.11.9",
+    "timestamp_utc": "2026-05-25T02:05:39.685267Z"
+  },
+  "status": {
+    "audio_ready": true,
+    "transcription_ready": false,
+    "llm_processed": false
+  }
+}
