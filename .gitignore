@@ -1,0 +1,12 @@
+.env
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+meeting_audio/*.ogg
+meeting_audio/*.txt
+meeting_audio/*.json
+meeting_audio/**/*.flac
+meetings.pkl
+*.log
+notepad requirements.lock.txt
