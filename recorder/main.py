@@ -118,8 +118,10 @@ def process_meeting_in_minutes_api(guild_id: int, meeting: dict, audio_path: str
 
     logger.info(f"[minutes_api] Sending payload: {payload}")
 
+    endpoint = f"{MINUTES_API_URL.rstrip('/')}/process-meeting"
+
     response = requests.post(
-        MINUTES_API_URL,
+        endpoint,
         json=payload,
         timeout=MINUTES_API_TIMEOUT,
     )

@@ -1,0 +1,76 @@
+{
+  "audio_file": "C:\\Users\\Hugo\\meetmind-recorder\\recorder\\meeting_audio\\meeting_20260531_171130.ogg",
+  "text": "Fala galera, beleza? Ó, vamos direto ao ponto aqui porque a japa tá quente. O pessoal do suporte começou a bombardear os lags com reclamação de que a busca caiu e tá dando timeout na tela inicial. Alguém já conseguiu abrir os logs para ver o que tá de fato acontecendo? Lucas, o que você tá vendo aí no monitoramento? Cara, pior que o início tá feio. Acabei de puxar o Grafana e o banco de dados simplesmente travou em 100% de uso. Tudo indica que aquela última query que a gente subiu pro histórico não aguentou o volume de acessos e deu um deadlock Eu tô tentando derrubar as conexões travadas manualmente agora pra ver se o sistema volta a respirar Pô, bizarro Se precisar, já chuta o balde e faz um rollback pro último pacote estável antes que o pessoal de negócios venha cobrar a gente Lucas, foca em isolar essa query zicada e me avisa se precisar de mais alguém no circuito pra te ajudar Valeu, Tim, vamos focar em apagar esse incêndio aí Fim do teste.",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 1.14,
+      "text": "Fala galera, beleza?"
+    },
+    {
+      "start": 1.74,
+      "end": 4.5,
+      "text": "Ó, vamos direto ao ponto aqui porque a japa tá quente."
+    },
+    {
+      "start": 4.7999997,
+      "end": 11.62,
+      "text": "O pessoal do suporte começou a bombardear os lags com reclamação de que a busca caiu e tá dando timeout na tela inicial."
+    },
+    {
+      "start": 12.16,
+      "end": 15.44,
+      "text": "Alguém já conseguiu abrir os logs para ver o que tá de fato acontecendo?"
+    },
+    {
+      "start": 16.26,
+      "end": 19.039999,
+      "text": "Lucas, o que você tá vendo aí no monitoramento?"
+    },
+    {
+      "start": 19.64,
+      "end": 21.42,
+      "text": "Cara, pior que o início tá feio."
+    },
+    {
+      "start": 21.82,
+      "end": 26.519999,
+      "text": "Acabei de puxar o Grafana e o banco de dados simplesmente travou em 100% de uso."
+    },
+    {
+      "start": 26.519999,
+      "end": 33.16,
+      "text": "Tudo indica que aquela última query que a gente subiu pro histórico não aguentou o volume de acessos e deu um deadlock"
+    },
+    {
+      "start": 33.16,
+      "end": 39.64,
+      "text": "Eu tô tentando derrubar as conexões travadas manualmente agora pra ver se o sistema volta a respirar"
+    },
+    {
+      "start": 39.64,
+      "end": 41.359997,
+      "text": "Pô, bizarro"
+    },
+    {
+      "start": 41.359997,
+      "end": 47.96,
+      "text": "Se precisar, já chuta o balde e faz um rollback pro último pacote estável antes que o pessoal de negócios venha cobrar a gente"
+    },
+    {
+      "start": 47.96,
+      "end": 53.539997,
+      "text": "Lucas, foca em isolar essa query zicada e me avisa se precisar de mais alguém no circuito pra te ajudar"
+    },
+    {
+      "start": 53.539997,
+      "end": 56.28,
+      "text": "Valeu, Tim, vamos focar em apagar esse incêndio aí"
+    },
+    {
+      "start": 56.28,
+      "end": 57.6,
+      "text": "Fim do teste."
+    }
+  ]
+}

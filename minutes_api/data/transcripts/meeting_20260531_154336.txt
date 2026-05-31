@@ -1,0 +1,18 @@
+Fala galera, beleza? Bom, vamos direto ao ponto que o dia tá corrido. A ideia hoje é dar uma olhada em como ficou o ambiente depois que a gente subiu o microserviço de busca na sexta, só pra gente entender se a latência caiu mesmo ou se a gente acabou arrumando sarna pra se coçar.
+Lucas, abriu o Datadog aí?
+O que dizem os gráficos?
+Cara, o cenário tá bem maneiro.
+O response time da API despencou uns 40%.
+Bizarro.
+E a CPU do servidor parou de esgoelar no horário de pico.
+Tá bem estável.
+O único mais é que começou a pipocar um monte de erro 400 no endpoint específico logo depois do deploy.
+Ainda tô caçando a causa raiz, tá?
+Pô, animal, menos 40% de latência salvou nossa pele com o produto
+Parabéns pelo trampo, sério
+Agora sobre os seus 400
+Cara, não deixe isso solto não
+Abra um card de bug lá no Gira para o pessoal priorizar
+Deve ser alguma validação de payload que passou batido
+Valeu time, bom código aí e vamos acompanhar isto
+Fim do teste

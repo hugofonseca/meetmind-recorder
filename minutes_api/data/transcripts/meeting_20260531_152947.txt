@@ -1,0 +1,11 @@
+Bom dia time, vamos direto ao ponto hoje para liberar todo mundo logo para o código.
+O nosso foco absoluto nesta manhã é eliminar os impeditivos para o deploy do novo microserviço de busca.
+Precisamos garantir que os testes de integração e stag rodem sem quebras para a esteira de CDI e CDI terminar o dia 100% verde.
+Lucas, puxa a fila como estamos a justo nos endpoints da API pós-code freeze.
+Fala Rodrigo, cara, os endpoints principais já estão refaturados e os testes unitários passaram localmente.
+O único gargalo agora é uma divergência na tipagem do banco de dados, que está quebrando a validação no ambiente de tagging.
+Eu já abri o pull request com a correção no giro, mas preciso que alguém prove o code review para que eu consiga rodar a esteira.
+Excelente. Assim que fecharmos a chamada, eu mesmo entro no giro e faço a aprovação do CPR para destravar o fluxo.
+Se mais alguém tiver algum impedimento técnico complexo, me chama no privado ou abre um breakout room para não tomar o tempo de todo mundo.
+Valeu, time. Bom código a todos e vamos acelerar essa sprint.
+Fim do teste.

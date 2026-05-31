@@ -1,0 +1,96 @@
+{
+  "audio_file": "C:\\Users\\Hugo\\meetmind-recorder\\recorder\\meeting_audio\\meeting_20260531_154336.ogg",
+  "text": "Fala galera, beleza? Bom, vamos direto ao ponto que o dia tá corrido. A ideia hoje é dar uma olhada em como ficou o ambiente depois que a gente subiu o microserviço de busca na sexta, só pra gente entender se a latência caiu mesmo ou se a gente acabou arrumando sarna pra se coçar. Lucas, abriu o Datadog aí? O que dizem os gráficos? Cara, o cenário tá bem maneiro. O response time da API despencou uns 40%. Bizarro. E a CPU do servidor parou de esgoelar no horário de pico. Tá bem estável. O único mais é que começou a pipocar um monte de erro 400 no endpoint específico logo depois do deploy. Ainda tô caçando a causa raiz, tá? Pô, animal, menos 40% de latência salvou nossa pele com o produto Parabéns pelo trampo, sério Agora sobre os seus 400 Cara, não deixe isso solto não Abra um card de bug lá no Gira para o pessoal priorizar Deve ser alguma validação de payload que passou batido Valeu time, bom código aí e vamos acompanhar isto Fim do teste",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 14.32,
+      "text": "Fala galera, beleza? Bom, vamos direto ao ponto que o dia tá corrido. A ideia hoje é dar uma olhada em como ficou o ambiente depois que a gente subiu o microserviço de busca na sexta, só pra gente entender se a latência caiu mesmo ou se a gente acabou arrumando sarna pra se coçar."
+    },
+    {
+      "start": 14.32,
+      "end": 16.58,
+      "text": "Lucas, abriu o Datadog aí?"
+    },
+    {
+      "start": 17.16,
+      "end": 18.5,
+      "text": "O que dizem os gráficos?"
+    },
+    {
+      "start": 18.94,
+      "end": 21.22,
+      "text": "Cara, o cenário tá bem maneiro."
+    },
+    {
+      "start": 21.58,
+      "end": 25.34,
+      "text": "O response time da API despencou uns 40%."
+    },
+    {
+      "start": 25.34,
+      "end": 26.1,
+      "text": "Bizarro."
+    },
+    {
+      "start": 26.46,
+      "end": 30.46,
+      "text": "E a CPU do servidor parou de esgoelar no horário de pico."
+    },
+    {
+      "start": 30.96,
+      "end": 31.76,
+      "text": "Tá bem estável."
+    },
+    {
+      "start": 32.34,
+      "end": 39.82,
+      "text": "O único mais é que começou a pipocar um monte de erro 400 no endpoint específico logo depois do deploy."
+    },
+    {
+      "start": 40.36,
+      "end": 42.739998,
+      "text": "Ainda tô caçando a causa raiz, tá?"
+    },
+    {
+      "start": 42.739998,
+      "end": 48.159996,
+      "text": "Pô, animal, menos 40% de latência salvou nossa pele com o produto"
+    },
+    {
+      "start": 48.159996,
+      "end": 50.1,
+      "text": "Parabéns pelo trampo, sério"
+    },
+    {
+      "start": 50.1,
+      "end": 51.78,
+      "text": "Agora sobre os seus 400"
+    },
+    {
+      "start": 51.78,
+      "end": 53.94,
+      "text": "Cara, não deixe isso solto não"
+    },
+    {
+      "start": 53.94,
+      "end": 57.879997,
+      "text": "Abra um card de bug lá no Gira para o pessoal priorizar"
+    },
+    {
+      "start": 57.879997,
+      "end": 61.339996,
+      "text": "Deve ser alguma validação de payload que passou batido"
+    },
+    {
+      "start": 61.339996,
+      "end": 65.159996,
+      "text": "Valeu time, bom código aí e vamos acompanhar isto"
+    },
+    {
+      "start": 65.159996,
+      "end": 66.54,
+      "text": "Fim do teste"
+    }
+  ]
+}

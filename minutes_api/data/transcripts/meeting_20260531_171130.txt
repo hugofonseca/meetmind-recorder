@@ -1,0 +1,14 @@
+Fala galera, beleza?
+Ó, vamos direto ao ponto aqui porque a japa tá quente.
+O pessoal do suporte começou a bombardear os lags com reclamação de que a busca caiu e tá dando timeout na tela inicial.
+Alguém já conseguiu abrir os logs para ver o que tá de fato acontecendo?
+Lucas, o que você tá vendo aí no monitoramento?
+Cara, pior que o início tá feio.
+Acabei de puxar o Grafana e o banco de dados simplesmente travou em 100% de uso.
+Tudo indica que aquela última query que a gente subiu pro histórico não aguentou o volume de acessos e deu um deadlock
+Eu tô tentando derrubar as conexões travadas manualmente agora pra ver se o sistema volta a respirar
+Pô, bizarro
+Se precisar, já chuta o balde e faz um rollback pro último pacote estável antes que o pessoal de negócios venha cobrar a gente
+Lucas, foca em isolar essa query zicada e me avisa se precisar de mais alguém no circuito pra te ajudar
+Valeu, Tim, vamos focar em apagar esse incêndio aí
+Fim do teste.

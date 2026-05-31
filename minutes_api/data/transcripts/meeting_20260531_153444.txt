@@ -1,0 +1,11 @@
+Bom dia, time. Vamos direto ao ponto hoje.
+O foco desta chamada é avaliar o impacto do deploy do novo microserviço de busca que subimos na sexta-feira.
+Precisamos analisar os dados da performance para entender se resolvemos o gargalo de latência ou se geramos algum débito técnico.
+Lucas, como estão as métricas de monitoramento lá no Datadog?
+Fala, Rodrigo. Cara, os resultados são positivos.
+O tempo de resposta das requisições na API caiu em 40% e o consumo de CPU nos microserviços estabilizou, mesmo no horário de pico.
+O único ponto de atenção na nossa avaliação é que identificamos um leve aumento nas taxas de erro 400 em um endpoint específico, logo após a virada de chave.
+Excelente análise. Uma queda de 40% na latência é um ótimo resultado. Parabéns pelo trabalho.
+Sobre esse erro 400, vamos abrir um bug track no Jira agora mesmo para investigar se há uma falha na validação dos dados do usuário.
+Valeu pelo reporte, time. Bom código a todos e vamos documentar esse aprendizado.
+Fim do teste.
