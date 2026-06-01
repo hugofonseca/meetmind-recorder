@@ -8,10 +8,58 @@ import pickle
 import ffmpeg
 import requests
 import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 import logging
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def ffprobe_duration_seconds(path: str) -> float:
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]
+    out = subprocess.check_output(cmd, text=True).strip()
+    return float(out)
+
+
+def validate_audio_file(path: str, min_size_bytes: int | None = None) -> float:
+    """
+    Valida se o arquivo existe, tem tamanho mínimo e pode ser lido pelo ffprobe.
+    Retorna a duração em segundos se estiver ok.
+    """
+    p = Path(path)
+
+    # define tamanho mínimo automaticamente conforme extensão
+    if min_size_bytes is None:
+        ext = p.suffix.lower()
+        if ext == ".ogg":
+            min_size_bytes = 4096
+        elif ext == ".wav":
+            min_size_bytes = 1024
+        else:
+            min_size_bytes = 1024
+
+    if not p.exists():
+        raise RuntimeError(f"Arquivo não encontrado: {path}")
+
+    size = p.stat().st_size
+    if size < min_size_bytes:
+        raise RuntimeError(f"Arquivo muito pequeno ou truncado: {path} ({size} bytes)")
+
+    try:
+        duration = ffprobe_duration_seconds(path)
+        return duration
+    except Exception as e:
+        raise RuntimeError(f"Arquivo inválido para ffprobe: {path} ({e})")
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +188,10 @@ class AudioSink(voice_recv.AudioSink):
         self.stopped = False
         self.meeting = meeting
 
+        self.pcm_bytes_written = 0
+        self.write_calls = 0
+        self.first_audio_logged = False
+
         os.makedirs("meeting_audio", exist_ok=True)
         timestamp = meeting["start_time"].strftime("%Y%m%d_%H%M%S")
         self.mix_path = os.path.join("meeting_audio", f"meeting_{timestamp}.wav")
@@ -151,26 +203,53 @@ class AudioSink(voice_recv.AudioSink):
 
         meeting["mix_audio_path"] = self.mix_path
         logger.info(f"[AudioSink] Recording started: {self.mix_path}")
+        logger.info("[AudioSink] DEBUG VERSION COM CONTADORES ATIVA")
 
     def wants_opus(self) -> bool:
         return False
 
     def write(self, user, data: voice_recv.VoiceData) -> None:
-        if self.stopped or not data.pcm or not user:
+        if self.stopped:
             return
+
+        if not data or not data.pcm:
+            return
+
         try:
+            self.write_calls += 1
+            self.pcm_bytes_written += len(data.pcm)
+
+            if not self.first_audio_logged:
+                logger.info(
+                    f"[AudioSink] First PCM packet received: user={user} bytes={len(data.pcm)}"
+                )
+                self.first_audio_logged = True
+
             self.mix_wav.writeframes(data.pcm)
+
         except Exception as e:
             logger.error(f"[AudioSink] Write error: {e}")
 
     def cleanup(self) -> None:
+        if self.stopped:
+            return
+
         self.stopped = True
         try:
-            if self.mix_wav:
+            if getattr(self, "mix_wav", None):
                 self.mix_wav.close()
-                logger.info(f"[AudioSink] WAV closed: {self.mix_path}")
+                self.mix_wav = None
+
+            logger.info(
+                f"[AudioSink] WAV closed: {self.mix_path} | "
+                f"write_calls={self.write_calls} | "
+                f"pcm_bytes_written={self.pcm_bytes_written}"
+            )
+
         except Exception as e:
             logger.error(f"[AudioSink] Cleanup error: {e}")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -180,30 +259,51 @@ async def compress_and_upload(
     channel: discord.TextChannel,
     wav_path: str,
     duration: str,
-) -> str:
+) -> str | None:
     """
     Convert WAV to OGG Opus and send as a Discord attachment.
 
-    Falls back to the raw WAV if ffmpeg conversion fails.
-    Handles Discord's 8 MB file-size limit gracefully.
-    Keeps the OGG on disk for downstream processing by the minutes API.
+    Returns:
+        - ogg_path (str) se o OGG foi gerado e validado com sucesso
+        - None se a conversão/validação falhar
+
+    O upload para o Discord ainda ocorre:
+        - com OGG se válido
+        - com WAV como fallback se o OGG falhar
     """
     ogg_path = wav_path.replace(".wav", ".ogg")
     upload_path = wav_path
+    process_path = None  # só será preenchido se o OGG passar na validação
 
     try:
-        (
+        # 1) valida o WAV antes da conversão
+        wav_duration = validate_audio_file(wav_path)
+        logger.info(f"[compress_and_upload] WAV validated: {wav_path} ({wav_duration:.2f}s)")
+
+        # 2) converte WAV -> OGG
+        out, err = (
             ffmpeg
             .input(wav_path)
             .output(ogg_path, acodec="libopus", ab="64k", ar=48000)
             .overwrite_output()
-            .run(quiet=True)
+            .run(capture_stdout=True, capture_stderr=True)
         )
-        upload_path = ogg_path
-        logger.info(f"[compress_and_upload] OGG created: {ogg_path}")
-    except Exception as e:
-        logger.warning(f"[compress_and_upload] ffmpeg failed, falling back to WAV: {e}")
 
+        # 3) valida o OGG depois da conversão
+        ogg_duration = validate_audio_file(ogg_path)
+        logger.info(f"[compress_and_upload] OGG created and validated: {ogg_path} ({ogg_duration:.2f}s)")
+
+        upload_path = ogg_path
+        process_path = ogg_path
+
+    except ffmpeg.Error as e:
+        stderr = e.stderr.decode(errors="ignore") if e.stderr else "sem stderr"
+        logger.warning(f"[compress_and_upload] ffmpeg failed, falling back to WAV: {stderr}")
+
+    except Exception as e:
+        logger.warning(f"[compress_and_upload] OGG invalid, falling back to WAV: {e}")
+
+    # Upload para o Discord (OGG válido ou WAV fallback)
     try:
         filename = os.path.basename(upload_path)
         with open(upload_path, "rb") as f:
@@ -213,6 +313,7 @@ async def compress_and_upload(
                 file=discord.File(f, filename=filename),
             )
         logger.info(f"[compress_and_upload] Uploaded: {filename}")
+
     except discord.HTTPException as e:
         if e.status == 413:
             await channel.send(
@@ -225,7 +326,8 @@ async def compress_and_upload(
             logger.error(f"[compress_and_upload] HTTP error uploading file: {e}")
             raise
 
-    return upload_path
+    return process_path
+
 
 
 # ---------------------------------------------------------------------------
@@ -463,29 +565,35 @@ async def end_meeting(ctx: commands.Context) -> None:
             await ctx.send("⏳ Processing, uploading audio, and generating minutes...")
             final_audio_path = await compress_and_upload(ctx.channel, mix_path, duration)
 
-            try:
-                result = await asyncio.to_thread(
-                    process_meeting_in_minutes_api,
-                    guild_id,
-                    meeting,
-                    final_audio_path,
-                )
-                meeting_id = result.get("id") or build_meeting_id(guild_id, meeting)
-                meeting_type = result.get("tipo", "N/A")
+        if final_audio_path is None:
+            await ctx.send(
+                "⚠️ Audio recorded successfully, but the converted OGG was invalid.\n"
+                "The audio was uploaded/saved, but automatic minutes generation was skipped."
+            )
+            return
 
-                await ctx.send(
-                    f"✅ **Minutes generated successfully!**\n"
-                    f"🆔 Meeting ID: `{meeting_id}`\n"
-                    f"📝 Type: `{meeting_type}`"
-                )
-            except Exception as e:
-                logger.error(f"[end_meeting] Error calling minutes API: {e}")
-                await ctx.send(
-                    f"⚠️ Audio recorded successfully, but failed to process minutes automatically.\n"
-                    f"Error: `{e}`"
-                )
-        else:
-            await ctx.send(f"✅ Meeting ended (duration: {duration}). Audio file not found.")
+        try:
+            result = await asyncio.to_thread(
+                process_meeting_in_minutes_api,
+                guild_id,
+                meeting,
+                final_audio_path,
+            )
+            meeting_id = result.get("id") or build_meeting_id(guild_id, meeting)
+            meeting_type = result.get("tipo", "N/A")
+
+            await ctx.send(
+                f"✅ **Minutes generated successfully!**\n"
+                f"🆔 Meeting ID: `{meeting_id}`\n"
+                f"📝 Type: `{meeting_type}`"
+            )
+        except Exception as e:
+            logger.error(f"[end_meeting] Error calling minutes API: {e}")
+            await ctx.send(
+                f"⚠️ Audio recorded successfully, but failed to process minutes automatically.\n"
+                f"Error: `{e}`"
+            )
+
 
     except Exception as e:
         logger.error(f"[end_meeting] Error: {e}")

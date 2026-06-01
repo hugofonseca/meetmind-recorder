@@ -4,6 +4,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 
 from transcriber import transcribe_ogg_file
 from pipeline import processar_transcricao
@@ -76,6 +77,10 @@ def process_meeting():
         minutes_dir=str(MINUTES_DIR)
     )
 
+    result["id"] = meeting_id
+    result["meeting_id"] = meeting_id
+    result["created_at"] = datetime.now(timezone.utc).isoformat()
+    result["preview"] = (result.get("ata") or "").replace("\n", " ")[:180]
     result["audio_file"] = audio_path
     result["transcript_txt"] = transcription["transcript_txt"]
     result["transcript_json"] = transcription["transcript_json"]
@@ -91,18 +96,37 @@ def process_meeting():
 
 @app.get("/meetings")
 def list_meetings():
-    files = sorted(MINUTES_DIR.glob("*.minutes.json"), reverse=True)
+    files = list(MINUTES_DIR.glob("*.minutes.json"))
     items = []
 
     for f in files:
-        data = json.loads(f.read_text(encoding="utf-8"))
-        items.append({
-            "id": data.get("id"),
-            "tipo": data.get("tipo"),
-            "preview": (data.get("ata") or "")[:180]
-        })
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+
+            meeting_id = (
+                data.get("id")
+                or data.get("meeting_id")
+                or f.name.replace(".minutes.json", "")
+            )
+
+            preview = data.get("preview")
+            if not preview:
+                preview = (data.get("ata") or "").replace("\n", " ")[:180]
+
+            items.append({
+                "id": meeting_id,
+                "tipo": data.get("tipo"),
+                "preview": preview,
+                "created_at": data.get("created_at", "")
+            })
+        except Exception:
+            continue
+
+    # ordena por data real, mais recente primeiro
+    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
     return jsonify(items)
+
 
 
 @app.get("/meetings/<meeting_id>")

@@ -11,6 +11,13 @@ __pycache__/
 meetings.pkl
 *.log
 
+# Artefatos gerados pela API
+minutes_api/data/transcripts/
+minutes_api/data/minutes/
+
+# Artefatos gerados pelo recorder
+recorder/meeting_audio/
+
 # Miscellaneous
 *.class
 *.log
