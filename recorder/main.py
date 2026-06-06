@@ -9,6 +9,7 @@ import ffmpeg
 import requests
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
@@ -193,16 +194,32 @@ class AudioSink(voice_recv.AudioSink):
         self.first_audio_logged = False
 
         os.makedirs("meeting_audio", exist_ok=True)
+
         timestamp = meeting["start_time"].strftime("%Y%m%d_%H%M%S")
-        self.mix_path = os.path.join("meeting_audio", f"meeting_{timestamp}.wav")
+
+        # WAV temporário (não fica mais em meeting_audio)
+        temp_dir = os.path.join(tempfile.gettempdir(), "meetmind-recorder")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        self.mix_path = os.path.join(temp_dir, f"meeting_{timestamp}.wav")
+
+        # Caminho final do OGG
+        self.final_ogg_path = os.path.join("meeting_audio", f"meeting_{timestamp}.ogg")
 
         self.mix_wav = wave.open(self.mix_path, "wb")
         self.mix_wav.setnchannels(2)
         self.mix_wav.setsampwidth(2)
         self.mix_wav.setframerate(48000)
 
+        # Compatibilidade: manter a chave antiga por enquanto
         meeting["mix_audio_path"] = self.mix_path
-        logger.info(f"[AudioSink] Recording started: {self.mix_path}")
+
+        # Caminhos mais explícitos
+        meeting["raw_audio_path"] = self.mix_path
+        meeting["final_ogg_path"] = self.final_ogg_path
+
+        logger.info(f"[AudioSink] Recording started (temp WAV): {self.mix_path}")
+        logger.info(f"[AudioSink] Final OGG target: {self.final_ogg_path}")
         logger.info("[AudioSink] DEBUG VERSION COM CONTADORES ATIVA")
 
     def wants_opus(self) -> bool:
@@ -241,7 +258,7 @@ class AudioSink(voice_recv.AudioSink):
                 self.mix_wav = None
 
             logger.info(
-                f"[AudioSink] WAV closed: {self.mix_path} | "
+                f"[AudioSink] Temp WAV closed: {self.mix_path} | "
                 f"write_calls={self.write_calls} | "
                 f"pcm_bytes_written={self.pcm_bytes_written}"
             )
@@ -253,7 +270,7 @@ class AudioSink(voice_recv.AudioSink):
 
 
 # ---------------------------------------------------------------------------
-# Compress WAV → OGG and upload to Discord
+# Compress WAV → OGG and upload to Discord ?????????
 # ---------------------------------------------------------------------------
 async def compress_and_upload(
     channel: discord.TextChannel,
@@ -271,9 +288,14 @@ async def compress_and_upload(
         - com OGG se válido
         - com WAV como fallback se o OGG falhar
     """
-    ogg_path = wav_path.replace(".wav", ".ogg")
+    os.makedirs("meeting_audio", exist_ok=True)
+
+    base_name = os.path.splitext(os.path.basename(wav_path))[0]
+    ogg_path = os.path.join("meeting_audio", f"{base_name}.ogg")
+
     upload_path = wav_path
     process_path = None  # só será preenchido se o OGG passar na validação
+    ogg_created = False
 
     try:
         # 1) valida o WAV antes da conversão
@@ -295,6 +317,7 @@ async def compress_and_upload(
 
         upload_path = ogg_path
         process_path = ogg_path
+        ogg_created = True
 
     except ffmpeg.Error as e:
         stderr = e.stderr.decode(errors="ignore") if e.stderr else "sem stderr"
@@ -325,6 +348,14 @@ async def compress_and_upload(
         else:
             logger.error(f"[compress_and_upload] HTTP error uploading file: {e}")
             raise
+
+    # Remove o WAV temporário somente se o OGG foi gerado com sucesso
+    if ogg_created and os.path.exists(wav_path):
+        try:
+            os.remove(wav_path)
+            logger.info(f"[compress_and_upload] Temp WAV removed: {wav_path}")
+        except Exception as e:
+            logger.warning(f"[compress_and_upload] Could not remove temp WAV: {wav_path} ({e})")
 
     return process_path
 
