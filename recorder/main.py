@@ -20,7 +20,12 @@ from meetings.state import (
     iter_active_meetings,
     clear_all_active_meetings
 )
-from meetings.service import start_meeting_handler, end_meeting_handler
+from meetings.service import (
+    start_meeting_handler,
+    end_meeting_handler,
+    meeting_status_handler,
+    auto_end_meeting_handler,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -193,58 +198,13 @@ async def fail_meeting_capture(
 # Auto-end when everyone leaves the voice channel
 # ---------------------------------------------------------------------------
 async def auto_end_meeting(guild_id: int) -> None:
-    """Disconnect, compress, upload audio, and process minutes automatically."""
-    meeting = clear_active_meeting(guild_id)
-    if not meeting:
-        return
+    await auto_end_meeting_handler(
+        guild_id,
+        save_meetings_fn=save_meetings,
+        process_meeting_in_minutes_api_fn=process_meeting_in_minutes_api,
+        build_meeting_id_fn=build_meeting_id,
+    )
 
-    try:
-        sink = meeting.get("sink")
-        if sink and hasattr(sink, "cleanup"):
-            sink.cleanup()
-
-        vc = meeting.get("vc")
-        if vc:
-            await vc.disconnect()
-
-        mix_path = meeting.get("mix_audio_path")
-        channel = meeting.get("channel")
-        duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
-
-        if channel:
-            if mix_path and os.path.exists(mix_path):
-                await channel.send("⏳ Everyone left — processing, uploading audio, and generating minutes...")
-                final_audio_path = await compress_and_upload(channel, mix_path, duration)
-
-                try:
-                    result = await asyncio.to_thread(
-                        process_meeting_in_minutes_api,
-                        guild_id,
-                        meeting,
-                        final_audio_path,
-                    )
-                    meeting_id = result.get("id") or build_meeting_id(guild_id, meeting)
-                    meeting_type = result.get("tipo", "N/A")
-
-                    await channel.send(
-                        f"✅ **Minutes generated successfully!**\n"
-                        f"🆔 Meeting ID: `{meeting_id}`\n"
-                        f"📝 Type: `{meeting_type}`"
-                    )
-                except Exception as e:
-                    logger.error(f"[auto_end_meeting] Error calling minutes API: {e}")
-                    await channel.send(
-                        f"⚠️ Audio was recorded, but automatic minute generation failed.\n"
-                        f"Error: `{e}`"
-                    )
-            else:
-                await channel.send("🔇 Meeting ended automatically. Audio file not found.")
-
-    except Exception as e:
-        logger.error(f"[auto_end_meeting] Error for guild {guild_id}: {e}")
-    finally:
-        clear_active_meeting(guild_id)
-        save_meetings()
 
 
 # ---------------------------------------------------------------------------
@@ -313,35 +273,7 @@ async def end_meeting(ctx: commands.Context) -> None:
 
 @bot.command(name="meeting_status", aliases=["status", "meeting_info"])
 async def meeting_status(ctx: commands.Context) -> None:
-    """Show whether a meeting is currently active and how long it has been running."""
-    guild_id = ctx.guild.id
-    meeting = get_active_meeting(guild_id)
-
-    if not meeting:
-        embed = discord.Embed(
-            title="🎙️ Meeting Status",
-            description="No active meeting in this server.",
-            color=0xFF0000,
-        )
-        embed.add_field(
-            name="Start one",
-            value="Join a voice channel, then run `!start_meeting`.",
-            inline=False,
-        )
-        await ctx.send(embed=embed)
-        return
-
-    duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
-
-    embed = discord.Embed(title="🎙️ Active Meeting", color=0x00FF00)
-    embed.add_field(name="Status", value="🟢 **RECORDING**", inline=True)
-    embed.add_field(name="Duration", value=f"⏱️ {duration}", inline=True)
-    embed.add_field(name="Started by", value=f"<@{meeting['started_by']}>", inline=True)
-
-    mix_path = meeting.get("mix_audio_path") or "pending…"
-    embed.add_field(name="Audio file", value=f"`{mix_path}`", inline=False)
-    embed.set_footer(text="Use !end_meeting to stop and receive the audio file.")
-    await ctx.send(embed=embed)
+    await meeting_status_handler(ctx)
 
 
 @bot.command(name="restore_meeting", aliases=["restore", "recover_meeting"])

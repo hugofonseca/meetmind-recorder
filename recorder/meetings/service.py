@@ -180,3 +180,110 @@ async def end_meeting_handler(
     finally:
         clear_active_meeting(guild_id)
         save_meetings_fn()
+
+async def meeting_status_handler(ctx: commands.Context) -> None:
+    """Show whether a meeting is currently active and how long it has been running."""
+    guild_id = ctx.guild.id
+    meeting = get_active_meeting(guild_id)
+
+    if not meeting:
+        embed = discord.Embed(
+            title="🎙️ Meeting Status",
+            description="No active meeting in this server.",
+            color=0xFF0000,
+        )
+        embed.add_field(
+            name="Start one",
+            value="Join a voice channel, then run `!start_meeting`.",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+        return
+
+    duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
+
+    embed = discord.Embed(title="🎙️ Active Meeting", color=0x00FF00)
+    embed.add_field(name="Status", value="🟢 **RECORDING**", inline=True)
+    embed.add_field(name="Duration", value=f"⏱️ {duration}", inline=True)
+    embed.add_field(name="Started by", value=f"<@{meeting['started_by']}>", inline=True)
+
+    mix_path = meeting.get("mix_audio_path") or "pending…"
+    embed.add_field(name="Audio file", value=f"`{mix_path}`", inline=False)
+    embed.set_footer(text="Use !end_meeting to stop and receive the audio file.")
+    await ctx.send(embed=embed)
+
+async def auto_end_meeting_handler(
+    guild_id: int,
+    *,
+    save_meetings_fn,
+    process_meeting_in_minutes_api_fn,
+    build_meeting_id_fn,
+) -> None:
+    """Disconnect, compress, upload audio, and process minutes automatically."""
+    meeting = get_active_meeting(guild_id)
+    if not meeting:
+        return
+
+    final_audio_path = None
+
+    try:
+        sink = meeting.get("sink")
+        if sink and hasattr(sink, "cleanup"):
+            sink.cleanup()
+
+        vc = meeting.get("vc")
+        if vc:
+            try:
+                await vc.disconnect()
+            except Exception as e:
+                logger.warning(
+                    f"[auto_end_meeting_handler] Error disconnecting voice client for guild {guild_id}: {e}"
+                )
+
+        mix_path = meeting.get("mix_audio_path")
+        channel = meeting.get("channel")
+        duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
+
+        if channel:
+            if mix_path and os.path.exists(mix_path):
+                await channel.send(
+                    "⏳ Everyone left — processing, uploading audio, and generating minutes..."
+                )
+                final_audio_path = await compress_and_upload(channel, mix_path, duration)
+
+                if final_audio_path is None:
+                    await channel.send(
+                        "⚠️ Audio was recorded, but the converted OGG was invalid.\n"
+                        "The audio was uploaded/saved, but automatic minute generation was skipped."
+                    )
+                    return
+
+                try:
+                    result = await asyncio.to_thread(
+                        process_meeting_in_minutes_api_fn,
+                        guild_id,
+                        meeting,
+                        final_audio_path,
+                    )
+                    meeting_id = result.get("id") or build_meeting_id_fn(guild_id, meeting)
+                    meeting_type = result.get("tipo", "N/A")
+
+                    await channel.send(
+                        f"✅ **Minutes generated successfully!**\n"
+                        f"🆔 Meeting ID: `{meeting_id}`\n"
+                        f"📝 Type: `{meeting_type}`"
+                    )
+                except Exception as e:
+                    logger.error(f"[auto_end_meeting_handler] Error calling minutes API: {e}")
+                    await channel.send(
+                        f"⚠️ Audio was recorded, but automatic minute generation failed.\n"
+                        f"Error: `{e}`"
+                    )
+            else:
+                await channel.send("🔇 Meeting ended automatically. Audio file not found.")
+
+    except Exception as e:
+        logger.error(f"[auto_end_meeting_handler] Error for guild {guild_id}: {e}")
+    finally:
+        clear_active_meeting(guild_id)
+        save_meetings_fn()
