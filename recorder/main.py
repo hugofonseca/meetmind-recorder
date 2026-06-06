@@ -2,66 +2,30 @@ import discord
 from discord.ext import commands, voice_recv
 import datetime
 import os
-import wave
 import asyncio
 import pickle
-import ffmpeg
 import requests
 import re
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 import logging
+from audio.sink import AudioSink
+from audio.processing import compress_and_upload
+from meetings.state import (
+    get_active_meeting,
+    set_active_meeting,
+    clear_active_meeting,
+    has_active_meeting,
+    iter_active_meetings,
+    clear_all_active_meetings
+)
+from meetings.service import start_meeting_handler
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def ffprobe_duration_seconds(path: str) -> float:
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        path,
-    ]
-    out = subprocess.check_output(cmd, text=True).strip()
-    return float(out)
-
-
-def validate_audio_file(path: str, min_size_bytes: int | None = None) -> float:
-    """
-    Valida se o arquivo existe, tem tamanho mínimo e pode ser lido pelo ffprobe.
-    Retorna a duração em segundos se estiver ok.
-    """
-    p = Path(path)
-
-    # define tamanho mínimo automaticamente conforme extensão
-    if min_size_bytes is None:
-        ext = p.suffix.lower()
-        if ext == ".ogg":
-            min_size_bytes = 4096
-        elif ext == ".wav":
-            min_size_bytes = 1024
-        else:
-            min_size_bytes = 1024
-
-    if not p.exists():
-        raise RuntimeError(f"Arquivo não encontrado: {path}")
-
-    size = p.stat().st_size
-    if size < min_size_bytes:
-        raise RuntimeError(f"Arquivo muito pequeno ou truncado: {path} ({size} bytes)")
-
-    try:
-        duration = ffprobe_duration_seconds(path)
-        return duration
-    except Exception as e:
-        raise RuntimeError(f"Arquivo inválido para ffprobe: {path} ({e})")
-
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -90,17 +54,13 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# guild_id -> meeting dict
-active_meetings: dict = {}
-
-
 # ---------------------------------------------------------------------------
 # Persistence helpers (survive bot restarts)
 # ---------------------------------------------------------------------------
 def save_meetings() -> None:
     """Persist serialisable meeting metadata to disk."""
     serialisable = {}
-    for guild_id, meeting in active_meetings.items():
+    for guild_id, meeting in iter_active_meetings():
         serialisable[guild_id] = {
             "start_time": meeting["start_time"],
             "started_by": meeting["started_by"],
@@ -113,7 +73,6 @@ def save_meetings() -> None:
     except Exception as e:
         logger.error(f"[save_meetings] Failed: {e}")
 
-
 def load_meetings() -> None:
     """Load persisted meeting metadata on startup."""
     if not os.path.exists(MEETINGS_FILE):
@@ -121,8 +80,9 @@ def load_meetings() -> None:
     try:
         with open(MEETINGS_FILE, "rb") as f:
             saved: dict = pickle.load(f)
+
         for guild_id, data in saved.items():
-            active_meetings[guild_id] = {
+            set_active_meeting(guild_id, {
                 "channel": None,
                 "channel_id": data.get("channel_id"),
                 "vc": None,
@@ -130,7 +90,8 @@ def load_meetings() -> None:
                 "start_time": data["start_time"],
                 "started_by": data["started_by"],
                 "mix_audio_path": data.get("mix_audio_path"),
-            }
+            })
+
         logger.info(f"[load_meetings] Loaded {len(saved)} meeting(s) from disk.")
     except Exception as e:
         logger.error(f"[load_meetings] Failed: {e}")
@@ -176,190 +137,6 @@ def process_meeting_in_minutes_api(guild_id: int, meeting: dict, audio_path: str
     )
     response.raise_for_status()
     return response.json()
-
-
-# ---------------------------------------------------------------------------
-# Audio sink — captures PCM and writes a stereo 48 kHz WAV file
-# ---------------------------------------------------------------------------
-class AudioSink(voice_recv.AudioSink):
-    """Writes every incoming voice packet to a single mixed WAV file."""
-
-    def __init__(self, meeting: dict):
-        super().__init__()
-        self.stopped = False
-        self.meeting = meeting
-
-        self.pcm_bytes_written = 0
-        self.write_calls = 0
-        self.first_audio_logged = False
-
-        os.makedirs("meeting_audio", exist_ok=True)
-
-        timestamp = meeting["start_time"].strftime("%Y%m%d_%H%M%S")
-
-        # WAV temporário (não fica mais em meeting_audio)
-        temp_dir = os.path.join(tempfile.gettempdir(), "meetmind-recorder")
-        os.makedirs(temp_dir, exist_ok=True)
-
-        self.mix_path = os.path.join(temp_dir, f"meeting_{timestamp}.wav")
-
-        # Caminho final do OGG
-        self.final_ogg_path = os.path.join("meeting_audio", f"meeting_{timestamp}.ogg")
-
-        self.mix_wav = wave.open(self.mix_path, "wb")
-        self.mix_wav.setnchannels(2)
-        self.mix_wav.setsampwidth(2)
-        self.mix_wav.setframerate(48000)
-
-        # Compatibilidade: manter a chave antiga por enquanto
-        meeting["mix_audio_path"] = self.mix_path
-
-        # Caminhos mais explícitos
-        meeting["raw_audio_path"] = self.mix_path
-        meeting["final_ogg_path"] = self.final_ogg_path
-
-        logger.info(f"[AudioSink] Recording started (temp WAV): {self.mix_path}")
-        logger.info(f"[AudioSink] Final OGG target: {self.final_ogg_path}")
-        logger.info("[AudioSink] DEBUG VERSION COM CONTADORES ATIVA")
-
-    def wants_opus(self) -> bool:
-        return False
-
-    def write(self, user, data: voice_recv.VoiceData) -> None:
-        if self.stopped:
-            return
-
-        if not data or not data.pcm:
-            return
-
-        try:
-            self.write_calls += 1
-            self.pcm_bytes_written += len(data.pcm)
-
-            if not self.first_audio_logged:
-                logger.info(
-                    f"[AudioSink] First PCM packet received: user={user} bytes={len(data.pcm)}"
-                )
-                self.first_audio_logged = True
-
-            self.mix_wav.writeframes(data.pcm)
-
-        except Exception as e:
-            logger.error(f"[AudioSink] Write error: {e}")
-
-    def cleanup(self) -> None:
-        if self.stopped:
-            return
-
-        self.stopped = True
-        try:
-            if getattr(self, "mix_wav", None):
-                self.mix_wav.close()
-                self.mix_wav = None
-
-            logger.info(
-                f"[AudioSink] Temp WAV closed: {self.mix_path} | "
-                f"write_calls={self.write_calls} | "
-                f"pcm_bytes_written={self.pcm_bytes_written}"
-            )
-
-        except Exception as e:
-            logger.error(f"[AudioSink] Cleanup error: {e}")
-
-
-
-
-# ---------------------------------------------------------------------------
-# Compress WAV → OGG and upload to Discord ?????????
-# ---------------------------------------------------------------------------
-async def compress_and_upload(
-    channel: discord.TextChannel,
-    wav_path: str,
-    duration: str,
-) -> str | None:
-    """
-    Convert WAV to OGG Opus and send as a Discord attachment.
-
-    Returns:
-        - ogg_path (str) se o OGG foi gerado e validado com sucesso
-        - None se a conversão/validação falhar
-
-    O upload para o Discord ainda ocorre:
-        - com OGG se válido
-        - com WAV como fallback se o OGG falhar
-    """
-    os.makedirs("meeting_audio", exist_ok=True)
-
-    base_name = os.path.splitext(os.path.basename(wav_path))[0]
-    ogg_path = os.path.join("meeting_audio", f"{base_name}.ogg")
-
-    upload_path = wav_path
-    process_path = None  # só será preenchido se o OGG passar na validação
-    ogg_created = False
-
-    try:
-        # 1) valida o WAV antes da conversão
-        wav_duration = validate_audio_file(wav_path)
-        logger.info(f"[compress_and_upload] WAV validated: {wav_path} ({wav_duration:.2f}s)")
-
-        # 2) converte WAV -> OGG
-        out, err = (
-            ffmpeg
-            .input(wav_path)
-            .output(ogg_path, acodec="libopus", ab="64k", ar=48000)
-            .overwrite_output()
-            .run(capture_stdout=True, capture_stderr=True)
-        )
-
-        # 3) valida o OGG depois da conversão
-        ogg_duration = validate_audio_file(ogg_path)
-        logger.info(f"[compress_and_upload] OGG created and validated: {ogg_path} ({ogg_duration:.2f}s)")
-
-        upload_path = ogg_path
-        process_path = ogg_path
-        ogg_created = True
-
-    except ffmpeg.Error as e:
-        stderr = e.stderr.decode(errors="ignore") if e.stderr else "sem stderr"
-        logger.warning(f"[compress_and_upload] ffmpeg failed, falling back to WAV: {stderr}")
-
-    except Exception as e:
-        logger.warning(f"[compress_and_upload] OGG invalid, falling back to WAV: {e}")
-
-    # Upload para o Discord (OGG válido ou WAV fallback)
-    try:
-        filename = os.path.basename(upload_path)
-        with open(upload_path, "rb") as f:
-            await channel.send(
-                f"✅ **Meeting ended!** ⏱️ Duration: {duration}\n"
-                f"🎙️ Download your recording below:",
-                file=discord.File(f, filename=filename),
-            )
-        logger.info(f"[compress_and_upload] Uploaded: {filename}")
-
-    except discord.HTTPException as e:
-        if e.status == 413:
-            await channel.send(
-                f"✅ Meeting ended (duration: {duration}).\n"
-                f"⚠️ Audio file too large to upload to Discord.\n"
-                f"📁 Saved locally at: `{upload_path}`"
-            )
-            logger.warning(f"[compress_and_upload] File too large for Discord: {upload_path}")
-        else:
-            logger.error(f"[compress_and_upload] HTTP error uploading file: {e}")
-            raise
-
-    # Remove o WAV temporário somente se o OGG foi gerado com sucesso
-    if ogg_created and os.path.exists(wav_path):
-        try:
-            os.remove(wav_path)
-            logger.info(f"[compress_and_upload] Temp WAV removed: {wav_path}")
-        except Exception as e:
-            logger.warning(f"[compress_and_upload] Could not remove temp WAV: {wav_path} ({e})")
-
-    return process_path
-
-
 
 # ---------------------------------------------------------------------------
 # Fallback handler — corrupted Opus stream
@@ -408,7 +185,7 @@ async def fail_meeting_capture(
                 pass
 
     finally:
-        active_meetings.pop(guild_id, None)
+        clear_active_meeting(guild_id)
         save_meetings()
 
 
@@ -417,7 +194,7 @@ async def fail_meeting_capture(
 # ---------------------------------------------------------------------------
 async def auto_end_meeting(guild_id: int) -> None:
     """Disconnect, compress, upload audio, and process minutes automatically."""
-    meeting = active_meetings.pop(guild_id, None)
+    meeting = clear_active_meeting(guild_id)
     if not meeting:
         return
 
@@ -466,6 +243,7 @@ async def auto_end_meeting(guild_id: int) -> None:
     except Exception as e:
         logger.error(f"[auto_end_meeting] Error for guild {guild_id}: {e}")
     finally:
+        clear_active_meeting(guild_id)
         save_meetings()
 
 
@@ -482,10 +260,10 @@ async def on_ready() -> None:
 
 async def restore_meeting_channels() -> None:
     """Re-attach channel objects to meetings that survived a restart."""
-    for guild_id, meeting in list(active_meetings.items()):
+    for guild_id, meeting in iter_active_meetings():
         guild = bot.get_guild(guild_id)
         if not guild:
-            active_meetings.pop(guild_id, None)
+            clear_active_meeting(guild_id)
             continue
 
         channel_id = meeting.get("channel_id")
@@ -501,7 +279,7 @@ async def restore_meeting_channels() -> None:
 @bot.event
 async def on_voice_state_update(member, before, after) -> None:
     """Auto-end a meeting when the voice channel empties."""
-    for guild_id, meeting in list(active_meetings.items()):
+    for guild_id, meeting in iter_active_meetings():
         vc = meeting.get("vc")
         if vc and vc.channel:
             human_members = [m for m in vc.channel.members if not m.bot]
@@ -515,57 +293,11 @@ async def on_voice_state_update(member, before, after) -> None:
 # ---------------------------------------------------------------------------
 @bot.command(name="start_meeting", aliases=["start", "begin_meeting"])
 async def start_meeting(ctx: commands.Context) -> None:
-    """Join the caller's voice channel and start recording audio."""
-    if ctx.author.voice is None:
-        await ctx.send("❌ You must be in a voice channel to start a meeting.")
-        return
-
-    guild_id = ctx.guild.id
-
-    if guild_id in active_meetings:
-        await ctx.send("❌ A meeting is already active. Use `!end_meeting` to stop it first.")
-        return
-
-    try:
-        voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
-    except Exception as e:
-        await ctx.send(f"❌ Failed to connect to voice channel: {e}")
-        return
-
-    meeting = {
-        "channel": ctx.channel,
-        "channel_id": ctx.channel.id,
-        "vc": voice_client,
-        "sink": None,
-        "start_time": datetime.datetime.now(),
-        "started_by": ctx.author.id,
-        "mix_audio_path": None,
-    }
-    active_meetings[guild_id] = meeting
-
-    sink = AudioSink(meeting)
-    meeting["sink"] = sink
-
-    def after_listen(err: Optional[Exception]) -> None:
-        if err is None:
-            return
-        if isinstance(err, discord.opus.OpusError) and "corrupted stream" in str(err).lower():
-            loop = bot.loop
-            if loop and not loop.is_closed():
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(
-                        fail_meeting_capture(guild_id, meeting, str(err), ctx)
-                    )
-                )
-        else:
-            logger.error(f"[after_listen] Voice error: {err}")
-
-    voice_client.listen(sink, after=after_listen)
-    save_meetings()
-
-    await ctx.send(
-        f"✅ **Meeting started!** Recording audio in `{ctx.author.voice.channel.name}`.\n"
-        f"Use `!end_meeting` to stop and receive the audio file."
+    await start_meeting_handler(
+        ctx,
+        save_meetings_fn=save_meetings,
+        bot_loop=bot.loop,
+        fail_meeting_capture_fn=fail_meeting_capture,
     )
 
 
@@ -573,12 +305,13 @@ async def start_meeting(ctx: commands.Context) -> None:
 async def end_meeting(ctx: commands.Context) -> None:
     """Stop recording, upload audio, and process minutes automatically."""
     guild_id = ctx.guild.id
+    meeting = get_active_meeting(guild_id)
 
-    if guild_id not in active_meetings:
+    if not meeting:
         await ctx.send("❌ No active meeting found in this server.")
         return
 
-    meeting = active_meetings.pop(guild_id)
+    final_audio_path = None
 
     try:
         sink = meeting.get("sink")
@@ -595,6 +328,11 @@ async def end_meeting(ctx: commands.Context) -> None:
         if mix_path and os.path.exists(mix_path):
             await ctx.send("⏳ Processing, uploading audio, and generating minutes...")
             final_audio_path = await compress_and_upload(ctx.channel, mix_path, duration)
+        else:
+            await ctx.send(
+                "⚠️ Meeting was stopped, but no audio file was found to process."
+            )
+            return
 
         if final_audio_path is None:
             await ctx.send(
@@ -625,11 +363,11 @@ async def end_meeting(ctx: commands.Context) -> None:
                 f"Error: `{e}`"
             )
 
-
     except Exception as e:
         logger.error(f"[end_meeting] Error: {e}")
         await ctx.send("❌ Error ending meeting. Please try again.")
     finally:
+        clear_active_meeting(guild_id)
         save_meetings()
 
 
@@ -637,21 +375,9 @@ async def end_meeting(ctx: commands.Context) -> None:
 async def meeting_status(ctx: commands.Context) -> None:
     """Show whether a meeting is currently active and how long it has been running."""
     guild_id = ctx.guild.id
+    meeting = get_active_meeting(guild_id)
 
-    if guild_id in active_meetings:
-        meeting = active_meetings[guild_id]
-        duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
-
-        embed = discord.Embed(title="🎙️ Active Meeting", color=0x00FF00)
-        embed.add_field(name="Status", value="🟢 **RECORDING**", inline=True)
-        embed.add_field(name="Duration", value=f"⏱️ {duration}", inline=True)
-        embed.add_field(name="Started by", value=f"<@{meeting['started_by']}>", inline=True)
-
-        mix_path = meeting.get("mix_audio_path") or "pending…"
-        embed.add_field(name="Audio file", value=f"`{mix_path}`", inline=False)
-        embed.set_footer(text="Use !end_meeting to stop and receive the audio file.")
-        await ctx.send(embed=embed)
-    else:
+    if not meeting:
         embed = discord.Embed(
             title="🎙️ Meeting Status",
             description="No active meeting in this server.",
@@ -663,6 +389,19 @@ async def meeting_status(ctx: commands.Context) -> None:
             inline=False,
         )
         await ctx.send(embed=embed)
+        return
+
+    duration = str(datetime.datetime.now() - meeting["start_time"]).split(".")[0]
+
+    embed = discord.Embed(title="🎙️ Active Meeting", color=0x00FF00)
+    embed.add_field(name="Status", value="🟢 **RECORDING**", inline=True)
+    embed.add_field(name="Duration", value=f"⏱️ {duration}", inline=True)
+    embed.add_field(name="Started by", value=f"<@{meeting['started_by']}>", inline=True)
+
+    mix_path = meeting.get("mix_audio_path") or "pending…"
+    embed.add_field(name="Audio file", value=f"`{mix_path}`", inline=False)
+    embed.set_footer(text="Use !end_meeting to stop and receive the audio file.")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="restore_meeting", aliases=["restore", "recover_meeting"])
@@ -675,7 +414,7 @@ async def restore_meeting(ctx: commands.Context) -> None:
     """
     guild_id = ctx.guild.id
 
-    if guild_id in active_meetings:
+    if has_active_meeting(guild_id):
         await ctx.send("✅ A meeting is already active in this server.")
         return
 
@@ -697,7 +436,8 @@ async def restore_meeting(ctx: commands.Context) -> None:
             await ctx.send("❌ Saved meeting has expired (older than 24 hours).")
             return
 
-        active_meetings[guild_id] = {
+        
+        set_active_meeting(guild_id, {
             "channel": ctx.channel,
             "channel_id": ctx.channel.id,
             "vc": None,
@@ -705,7 +445,8 @@ async def restore_meeting(ctx: commands.Context) -> None:
             "start_time": data["start_time"],
             "started_by": data["started_by"],
             "mix_audio_path": data.get("mix_audio_path"),
-        }
+        })
+
 
         mix_path = data.get("mix_audio_path") or "unknown"
         await ctx.send(
@@ -724,11 +465,11 @@ async def fix_channel(ctx: commands.Context) -> None:
     """Point the active meeting's notification channel at the current channel."""
     guild_id = ctx.guild.id
 
-    if guild_id not in active_meetings:
+    if not has_active_meeting(guild_id):
         await ctx.send("❌ No active meeting found in this server.")
         return
 
-    meeting = active_meetings[guild_id]
+    meeting = get_active_meeting(guild_id)
     if meeting.get("channel") and meeting["channel"].id == ctx.channel.id:
         await ctx.send("✅ Channel reference is already correct.")
         return
