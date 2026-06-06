@@ -5,7 +5,9 @@ venv/
 __pycache__/
 *.pyc
 .ogg
+.wav
 .txt
+*.png
 .json
 .flac
 meetings.pkl
