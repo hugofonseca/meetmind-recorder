@@ -1,8 +1,9 @@
-import tempfile
-import os
+##import tempfile
+##import os
 import wave
 import logging
 from discord.ext import voice_recv
+from utils.paths import build_temp_wav_path, build_final_ogg_path
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +23,8 @@ class AudioSink(voice_recv.AudioSink):
         self.write_calls = 0
         self.first_audio_logged = False
 
-        os.makedirs("meeting_audio", exist_ok=True)
-
-        timestamp = meeting["start_time"].strftime("%Y%m%d_%H%M%S")
-
-        # WAV temporário (não fica mais em meeting_audio)
-        temp_dir = os.path.join(tempfile.gettempdir(), "meetmind-recorder")
-        os.makedirs(temp_dir, exist_ok=True)
-
-        self.mix_path = os.path.join(temp_dir, f"meeting_{timestamp}.wav")
-
-        # Caminho final do OGG
-        self.final_ogg_path = os.path.join("meeting_audio", f"meeting_{timestamp}.ogg")
+        self.mix_path = build_temp_wav_path(meeting["start_time"])
+        self.final_ogg_path = build_final_ogg_path(meeting["start_time"])
 
         self.mix_wav = wave.open(self.mix_path, "wb")
         self.mix_wav.setnchannels(2)
