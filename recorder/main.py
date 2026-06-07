@@ -1,24 +1,16 @@
 import discord
-from discord.ext import commands, voice_recv
+from discord.ext import commands
 import datetime
 import os
-import asyncio
 import pickle
-import requests
-import re
-from pathlib import Path
-from typing import Optional
 from dotenv import load_dotenv
 import logging
-from audio.sink import AudioSink
-from audio.processing import compress_and_upload
 from meetings.state import (
     get_active_meeting,
     set_active_meeting,
     clear_active_meeting,
     has_active_meeting,
     iter_active_meetings,
-    clear_all_active_meetings
 )
 from meetings.service import (
     start_meeting_handler,
@@ -30,11 +22,10 @@ from meetings.persistence import (
     save_meetings as persist_save_meetings,
     load_meetings as persist_load_meetings,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from integrations.minutes_api import (
+    build_meeting_id as integrations_build_meeting_id,
+    process_meeting_in_minutes_api as integrations_process_meeting_in_minutes_api,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -76,95 +67,18 @@ def load_meetings() -> None:
 # ---------------------------------------------------------------------------
 # Helpers for integration with minutes API
 # ---------------------------------------------------------------------------
-def sanitize_meeting_id(text: str) -> str:
-    text = (text or "").strip().lower()
-    text = re.sub(r"[^a-z0-9_-]+", "_", text)
-    text = re.sub(r"_+", "_", text).strip("_")
-    return text or "meeting"
-
-
 def build_meeting_id(guild_id: int, meeting: dict) -> str:
-    start_time = meeting.get("start_time")
-    started_by = meeting.get("started_by", "unknown")
-    timestamp = (
-        start_time.strftime("%Y%m%d_%H%M%S")
-        if start_time
-        else datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    )
-    return sanitize_meeting_id(f"guild_{guild_id}_{started_by}_{timestamp}")
-
+    return integrations_build_meeting_id(guild_id, meeting)
 
 def process_meeting_in_minutes_api(guild_id: int, meeting: dict, audio_path: str) -> dict:
-    meeting_id = build_meeting_id(guild_id, meeting)
-
-    payload = {
-        "meeting_id": meeting_id,
-        "audio_path": str(Path(audio_path).resolve()),
-    }
-
-    logger.info(f"[minutes_api] Sending payload: {payload}")
-
-    endpoint = f"{MINUTES_API_URL.rstrip('/')}/process-meeting"
-
-    response = requests.post(
-        endpoint,
-        json=payload,
+    return integrations_process_meeting_in_minutes_api(
+        guild_id,
+        meeting,
+        audio_path,
+        base_url=MINUTES_API_URL,
         timeout=MINUTES_API_TIMEOUT,
+        logger=logger,
     )
-    response.raise_for_status()
-    return response.json()
-
-# ---------------------------------------------------------------------------
-# Fallback handler — corrupted Opus stream
-# ---------------------------------------------------------------------------
-async def fail_meeting_capture(
-    guild_id: int,
-    meeting: dict,
-    reason: str,
-    ctx: Optional[commands.Context] = None,
-) -> None:
-    """Tear down a meeting that failed due to a bad audio stream."""
-    try:
-        sink = meeting.get("sink")
-        if sink and hasattr(sink, "cleanup"):
-            sink.cleanup()
-
-        vc = meeting.get("vc")
-        if vc:
-            if hasattr(vc, "is_listening") and vc.is_listening():
-                try:
-                    vc.stop_listening()
-                except Exception:
-                    pass
-            try:
-                await vc.disconnect()
-            except Exception:
-                pass
-
-        msg = (
-            "⚠️ **Audio capture failed (corrupted Opus stream).**\n"
-            "✅ For stable recording, use a **Stage Channel**.\n"
-            "➡️ Join the Stage and run `!start_meeting` again.\n"
-        )
-
-        channel = meeting.get("channel")
-        if channel:
-            try:
-                await channel.send(msg)
-            except Exception:
-                pass
-
-        if ctx and ctx.channel and (not channel or ctx.channel.id != channel.id):
-            try:
-                await ctx.send(msg)
-            except Exception:
-                pass
-
-    finally:
-        clear_active_meeting(guild_id)
-        save_meetings()
-
-
 # ---------------------------------------------------------------------------
 # Auto-end when everyone leaves the voice channel
 # ---------------------------------------------------------------------------
@@ -175,9 +89,6 @@ async def auto_end_meeting(guild_id: int) -> None:
         process_meeting_in_minutes_api_fn=process_meeting_in_minutes_api,
         build_meeting_id_fn=build_meeting_id,
     )
-
-
-
 # ---------------------------------------------------------------------------
 # Bot events
 # ---------------------------------------------------------------------------
@@ -187,7 +98,6 @@ async def on_ready() -> None:
     await restore_meeting_channels()
     logger.info(f"Logged in as {bot.user} | Guilds: {len(bot.guilds)}")
     print(f"✅ {bot.user} is online and ready.")
-
 
 async def restore_meeting_channels() -> None:
     """Re-attach channel objects to meetings that survived a restart."""
@@ -206,7 +116,6 @@ async def restore_meeting_channels() -> None:
             else:
                 logger.warning(f"[restore] Channel {channel_id} not found for guild {guild_id}")
 
-
 @bot.event
 async def on_voice_state_update(member, before, after) -> None:
     """Auto-end a meeting when the voice channel empties."""
@@ -217,8 +126,6 @@ async def on_voice_state_update(member, before, after) -> None:
             if not human_members:
                 logger.info(f"[voice_state] Auto-ending meeting for guild {guild_id}")
                 await auto_end_meeting(guild_id)
-
-
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -228,9 +135,7 @@ async def start_meeting(ctx: commands.Context) -> None:
         ctx,
         save_meetings_fn=save_meetings,
         bot_loop=bot.loop,
-        fail_meeting_capture_fn=fail_meeting_capture,
     )
-
 
 @bot.command(name="end_meeting", aliases=["end", "stop_meeting"])
 async def end_meeting(ctx: commands.Context) -> None:
@@ -241,11 +146,9 @@ async def end_meeting(ctx: commands.Context) -> None:
         build_meeting_id_fn=build_meeting_id,
     )
 
-
 @bot.command(name="meeting_status", aliases=["status", "meeting_info"])
 async def meeting_status(ctx: commands.Context) -> None:
     await meeting_status_handler(ctx)
-
 
 @bot.command(name="restore_meeting", aliases=["restore", "recover_meeting"])
 async def restore_meeting(ctx: commands.Context) -> None:
@@ -279,7 +182,6 @@ async def restore_meeting(ctx: commands.Context) -> None:
             await ctx.send("❌ Saved meeting has expired (older than 24 hours).")
             return
 
-        
         set_active_meeting(guild_id, {
             "channel": ctx.channel,
             "channel_id": ctx.channel.id,
@@ -289,7 +191,6 @@ async def restore_meeting(ctx: commands.Context) -> None:
             "started_by": data["started_by"],
             "mix_audio_path": data.get("mix_audio_path"),
         })
-
 
         mix_path = data.get("mix_audio_path") or "unknown"
         await ctx.send(
@@ -301,7 +202,6 @@ async def restore_meeting(ctx: commands.Context) -> None:
 
     except Exception as e:
         await ctx.send(f"❌ Error restoring meeting: {e}")
-
 
 @bot.command(name="fix_channel", aliases=["fix_ch", "repair_channel"])
 async def fix_channel(ctx: commands.Context) -> None:
@@ -325,7 +225,6 @@ async def fix_channel(ctx: commands.Context) -> None:
         f"✅ Notification channel updated to {ctx.channel.mention}.\n"
         f"`!end_meeting` will now upload the audio file here."
     )
-
 
 @bot.command(name="meeting_help", aliases=["help_meeting"])
 async def meeting_help(ctx: commands.Context) -> None:
@@ -364,8 +263,6 @@ async def on_command_error(ctx: commands.Context, error) -> None:
     else:
         logger.error(f"[on_command_error] {error}")
         await ctx.send(f"❌ An error occurred: {error}")
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands, voice_recv
 
 from audio.sink import AudioSink
-from audio.processing import compress_and_upload #está sendo usado??????
+from audio.processing import compress_and_upload
 from meetings.state import (
     get_active_meeting,
     set_active_meeting,
@@ -37,7 +37,6 @@ async def start_meeting_handler(
     *,
     save_meetings_fn,
     bot_loop,
-    fail_meeting_capture_fn,
 ) -> None:
     """Join the caller's voice channel and start recording audio."""
     if ctx.author.voice is None:
@@ -87,7 +86,13 @@ async def start_meeting_handler(
             if bot_loop and not bot_loop.is_closed():
                 bot_loop.call_soon_threadsafe(
                     lambda: asyncio.ensure_future(
-                        fail_meeting_capture_fn(guild_id, meeting, str(err), ctx)
+                        fail_meeting_capture_handler(
+                            guild_id,
+                            meeting,
+                            str(err),
+                            save_meetings_fn=save_meetings_fn,
+                            ctx=ctx,
+                        )
                     )
                 )
         else:
@@ -287,3 +292,52 @@ async def auto_end_meeting_handler(
     finally:
         clear_active_meeting(guild_id)
         save_meetings_fn()
+
+async def fail_meeting_capture_handler(
+    guild_id: int,
+    meeting: dict,
+    reason: str,
+    *,
+    save_meetings_fn,
+    ctx: Optional[commands.Context] = None,
+) -> None:
+    """Tear down a meeting that failed due to a bad audio stream."""
+    try:
+        sink = meeting.get("sink")
+        if sink and hasattr(sink, "cleanup"):
+            sink.cleanup()
+
+        vc = meeting.get("vc")
+        if vc:
+            if hasattr(vc, "is_listening") and vc.is_listening():
+                try:
+                    vc.stop_listening()
+                except Exception:
+                    pass
+            try:
+                await vc.disconnect()
+            except Exception:
+                pass
+
+        msg = (
+            "⚠️ **Audio capture failed (corrupted Opus stream).**\n"
+            "✅ For stable recording, use a **Stage Channel**.\n"
+            "➡️ Join the Stage and run `!start_meeting` again.\n"
+        )
+
+        channel = meeting.get("channel")
+        if channel:
+            try:
+                await channel.send(msg)
+            except Exception:
+                pass
+
+        if ctx and ctx.channel and (not channel or ctx.channel.id != channel.id):
+            try:
+                await ctx.send(msg)
+            except Exception:
+                pass
+
+    finally:
+        clear_active_meeting(guild_id)
+        save_meetings_fn()        
