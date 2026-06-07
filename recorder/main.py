@@ -26,6 +26,10 @@ from meetings.service import (
     meeting_status_handler,
     auto_end_meeting_handler,
 )
+from meetings.persistence import (
+    save_meetings as persist_save_meetings,
+    load_meetings as persist_load_meetings,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,45 +66,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ---------------------------------------------------------------------------
 # Persistence helpers (survive bot restarts)
 # ---------------------------------------------------------------------------
+
 def save_meetings() -> None:
-    """Persist serialisable meeting metadata to disk."""
-    serialisable = {}
-    for guild_id, meeting in iter_active_meetings():
-        serialisable[guild_id] = {
-            "start_time": meeting["start_time"],
-            "started_by": meeting["started_by"],
-            "channel_id": meeting.get("channel_id"),
-            "mix_audio_path": meeting.get("mix_audio_path"),
-        }
-    try:
-        with open(MEETINGS_FILE, "wb") as f:
-            pickle.dump(serialisable, f)
-    except Exception as e:
-        logger.error(f"[save_meetings] Failed: {e}")
+    persist_save_meetings(MEETINGS_FILE)
 
 def load_meetings() -> None:
-    """Load persisted meeting metadata on startup."""
-    if not os.path.exists(MEETINGS_FILE):
-        return
-    try:
-        with open(MEETINGS_FILE, "rb") as f:
-            saved: dict = pickle.load(f)
-
-        for guild_id, data in saved.items():
-            set_active_meeting(guild_id, {
-                "channel": None,
-                "channel_id": data.get("channel_id"),
-                "vc": None,
-                "sink": None,
-                "start_time": data["start_time"],
-                "started_by": data["started_by"],
-                "mix_audio_path": data.get("mix_audio_path"),
-            })
-
-        logger.info(f"[load_meetings] Loaded {len(saved)} meeting(s) from disk.")
-    except Exception as e:
-        logger.error(f"[load_meetings] Failed: {e}")
-
+    persist_load_meetings(MEETINGS_FILE)
 
 # ---------------------------------------------------------------------------
 # Helpers for integration with minutes API
