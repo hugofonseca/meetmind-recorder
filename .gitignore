@@ -65,3 +65,12 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Flutter desktop generated plugin files
+dashboard_flutter/linux/flutter/generated_plugin_registrant.cc
+dashboard_flutter/linux/flutter/generated_plugin_registrant.h
+dashboard_flutter/linux/flutter/generated_plugins.cmake
+dashboard_flutter/macos/Flutter/GeneratedPluginRegistrant.swift
+dashboard_flutter/windows/flutter/generated_plugin_registrant.cc
+dashboard_flutter/windows/flutter/generated_plugin_registrant.h
+dashboard_flutter/windows/flutter/generated_plugins.cmake
