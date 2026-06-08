@@ -1,36 +1,245 @@
-MeetMind — Atualização de operação!
-Este projeto foi reorganizado para funcionar como uma suíte com três partes: um bot do Discord para gravar reuniões, uma API Flask para transcrever e gerar atas, e um dashboard Flutter para visualizar e editar resultados.
+MeetMind
+========
 
-Estrutura atual
+Visão geral
+-----------
+MeetMind é um agente integrado para:
+- gravar reuniões no Discord;
+- transcrever áudio e gerar atas automaticamente;
+- visualizar e interagir com resultados em um dashboard Flutter.
 
-A estrutura principal passou a usar minutes_api/ para o backend, recorder/ para o bot e dashboard_flutter/ para a interface gráfica.
-O backend salva transcrições em data/transcripts/, chunks em data/chunks/ e atas em data/minutes/ dentro de minutes_api/.
+O agente é composto por três módulos principais:
+- recorder/: bot do Discord responsável por entrar no canal, gravar a reunião e enviar o áudio para processamento.
+- minutes_api/: API Flask responsável por transcrever o áudio e gerar a ata/minutes.
+- dashboard_flutter/: interface Flutter para visualização e interação com os resultados.
 
-Mudanças principais de hoje
+Arquitetura atual
+-----------------
+Estrutura principal:
 
-O app.py foi ajustado para trabalhar com os diretórios locais do backend e expor os endpoints GET /health, POST /gerar-ata, POST /process-meeting e GET /meetings.
-O endpoint manual /gerar-ata foi alinhado para receber o campo transcript, e não transcricao, o que exigiu também ajuste correspondente no Flutter para o modo manual.
-A geração automática de atas pelo bot passou a depender de POST /process-meeting, que transcreve o .ogg, executa o pipeline de resumo/classificação e salva um arquivo *.minutes.json em minutes_api/data/minutes/.
+meetmind-recorder/
+- recorder/
+- minutes_api/
+- dashboard_flutter/
 
-Correções técnicas aplicadas
+Estrutura atual do recorder/:
 
-O problema de ausência de arquivos em data/minutes/ foi identificado como consequência de falha anterior no processamento antes da gravação final do JSON.
-A integração com a Groq foi estabilizada após corrigir ambiente, dependências e compatibilidade de biblioteca HTTP para o fluxo de transcrição usado em transcriber.py.
-O bot também teve o ambiente Python ajustado para instalar corretamente discord.py e demais dependências do requirements.txt antes da execução de main.py.
+recorder/
+- main.py
+- audio/
+  - sink.py
+  - processing.py
+- meetings/
+  - state.py
+  - service.py
+  - persistence.py
+- integrations/
+  - minutes_api.py
+- utils/
+  - paths.py
 
-Dashboard mais prático
+Responsabilidades no recorder/:
+- main.py: entrypoint do bot, configuração e registro de comandos/eventos.
+- audio/sink.py: captura e gravação do áudio da reunião.
+- audio/processing.py: validação, conversão e upload do áudio final.
+- meetings/state.py: estado em memória das reuniões ativas.
+- meetings/service.py: fluxo principal de reuniões (start, end, status, auto-end e falhas).
+- meetings/persistence.py: persistência e restauração do estado das reuniões.
+- integrations/minutes_api.py: integração com a API Flask de atas.
+- utils/paths.py: centralização dos caminhos e nomes de arquivos.
 
-O dashboard original foi criado em fluxo manual, com campo para colar transcrição e botão para gerar ata via API.
-A recomendação passou a ser evoluí-lo para um fluxo híbrido: lista de reuniões salvas à esquerda, abertura de uma ata específica via endpoint de detalhe e modo manual preservado como alternativa.
-Para isso, o backend precisa usar a rota de detalhe GET /meetings/<meeting_id>, pois a versão antiga com @app.get("/meetings/") não permite recuperar uma reunião específica pelo identificador.
+Artefatos gerados
+-----------------
+Backend (minutes_api):
+- minutes_api/data/transcripts/
+- minutes_api/data/chunks/
+- minutes_api/data/minutes/
 
-Operação diária
+Recorder:
+- recorder/meeting_audio/
 
-A operação normal agora acontece com três processos separados: API Flask, bot Discord e dashboard Flutter em modo web ou desktop.
-Para reduzir atrito, foi proposta a criação de um script start_all.bat que abre os três terminais automaticamente usando os ambientes virtuais já preparados.
-Este pacote inclui também stop_all.bat, que tenta encerrar as janelas abertas com os títulos minutes_api, recorder e dashboard para facilitar o encerramento da suíte no Windows.
+Observação sobre áudio:
+- o recorder grava inicialmente um WAV temporário;
+- o WAV é convertido para OGG, que é o formato final do pipeline;
+- o WAV temporário é removido após a conversão bem-sucedida.
 
-Fluxo final esperado
+Principais avanços recentes
+---------------------------
+- O recorder foi modularizado e deixou de concentrar toda a lógica em um main.py extenso.
+- O pipeline de áudio foi consolidado com WAV temporário + OGG final.
+- A persistência do estado das reuniões foi separada da lógica de negócio.
+- A integração com a API de atas foi isolada em módulo próprio.
+- Caminhos e nomes de arquivos passaram a ser centralizados em utilitário específico.
+- O projeto ficou mais legível, testável e sustentável.
 
-Ao executar o bot e encerrar uma reunião no Discord, o áudio é salvo localmente, convertido e enviado para a API com meeting_id e audio_path.
-A API transcreve o áudio, classifica a reunião, gera a ata e grava o resultado em minutes_api/data/minutes/, tornando o conteúdo disponível para listagem em GET /meetings e leitura detalhada no dashboard.
+Pré-requisitos mínimos
+----------------------
+Para os módulos Python (minutes_api e recorder):
+- Python 3.10 ou superior.
+- FFmpeg completo instalado e disponível no PATH do sistema.
+- Importante: o projeto precisa dos executáveis "ffmpeg" e "ffprobe" acessíveis no PATH.
+- Uma chave GROQ_API_KEY.
+- Um token de bot do Discord.
+
+Para o dashboard Flutter (dashboard_flutter):
+- Flutter SDK instalado e acessível no PATH do sistema.
+- Google Chrome ou Microsoft Edge instalado.
+
+Ambientes virtuais
+------------------
+Cada módulo Python usa seu próprio ambiente virtual:
+- minutes_api/.venv
+- recorder/.venv
+
+O dashboard_flutter não usa venv de Python; ele depende do Flutter SDK instalado no sistema.
+
+Variáveis de ambiente
+---------------------
+minutes_api/.env
+GROQ_API_KEY=sua_chave_aqui
+PORT=5000
+
+recorder/.env
+DISCORD_TOKEN=seu_token_aqui
+MINUTES_API_URL=http://127.0.0.1:5000
+
+Instalação
+----------
+1) API de atas (minutes_api)
+cd minutes_api
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+2) Bot recorder (recorder)
+cd recorder
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+3) Dashboard Flutter (dashboard_flutter)
+cd dashboard_flutter
+flutter --version
+flutter doctor
+flutter devices
+flutter pub get
+
+Como executar localmente
+------------------------
+1) Subir a API Flask
+cd minutes_api
+.\.venv\Scripts\Activate.ps1
+python app.py
+
+Validação:
+http://127.0.0.1:5000/health
+Resposta esperada:
+{"status": "ok"}
+
+2) Subir o bot recorder
+cd recorder
+.\.venv\Scripts\Activate.ps1
+python main.py
+
+3) Subir o dashboard Flutter
+cd dashboard_flutter
+flutter pub get
+flutter run -d chrome
+
+Alternativa para ambientes limitados
+------------------------------------
+Se o dashboard Flutter tiver dificuldade para abrir com o target Chrome em máquinas mais antigas ou limitadas, use o modo Web Server:
+
+cd dashboard_flutter
+flutter run -d web-server --web-port 8080
+
+Há também um inicializador dedicado para esse cenário:
+- start_all_WebServer.bat
+
+Execução automatizada no Windows
+--------------------------------
+Scripts disponíveis na raiz do projeto:
+- start_all.bat
+- stop_all.bat
+- start_all_WebServer.bat
+
+Uso típico:
+- start_all.bat: sobe API, recorder e dashboard no fluxo padrão.
+- stop_all.bat: encerra as janelas/processos da suíte.
+- start_all_WebServer.bat: sobe o agente com o dashboard via Web Server.
+
+Fluxo do sistema
+----------------
+1. O bot entra no canal do Discord.
+2. O bot grava a reunião.
+3. O áudio é salvo localmente.
+4. O arquivo temporário é convertido para .ogg.
+5. O recorder envia meeting_id e audio_path para a API.
+6. A API:
+   - transcreve o áudio;
+   - classifica a reunião;
+   - gera a ata.
+7. O resultado final é salvo em minutes_api/data/minutes/.
+8. O dashboard permite listar e visualizar as reuniões.
+
+Endpoints principais da API
+---------------------------
+- GET  /health
+- POST /gerar-ata
+- POST /process-meeting
+- GET  /meetings
+
+Observações sobre integração:
+- O endpoint manual /gerar-ata recebe o campo transcript.
+- A geração automática de atas depende de POST /process-meeting.
+- Recomenda-se acrescentar GET /meetings/<meeting_id> para suportar abertura de uma reunião específica no dashboard.
+
+Dashboard
+---------
+O dashboard evoluiu de um fluxo puramente manual para um modelo híbrido:
+- listagem de reuniões;
+- visualização de atas;
+- fluxo manual preservado como alternativa.
+
+Troubleshooting
+---------------
+Erro: ModuleNotFoundError: No module named flask
+- Instale as dependências da API:
+  cd minutes_api
+  .\.venv\Scripts\Activate.ps1
+  python -m pip install -r requirements.txt
+
+Erro: HTTPConnectionPool(host=127.0.0.1, port=5000)
+- A API não está rodando. Inicie primeiro o python app.py dentro de minutes_api.
+
+Erro: ffmpeg não encontrado no PATH
+- Instale o FFmpeg completo e adicione a pasta bin ao PATH do Windows (tutorial específico em https://youtu.be/RNf8I2nxFKw?si=LD54cNyUhACokO_X).
+- Valide com os comandos abaixo no terminal:
+  ffmpeg -version
+  ffprobe -version
+
+Erro: flutter não reconhecido
+- Verifique se o Flutter SDK está instalado e no PATH.
+- Valide com:
+  flutter --version
+  flutter doctor
+  flutter devices
+
+Erro 404 ao finalizar a gravação
+- Verifique se o recorder está chamando o endpoint correto da API, especialmente POST /process-meeting.
+
+Estado atual do projeto
+-----------------------
+O projeto atingiu um estágio mais sólido, com:
+- arquitetura mais modular;
+- recorder menos acoplado;
+- pipeline de áudio estável;
+- integração com a API consolidada;
+- dashboard funcional em ambiente web;
+- melhor separação entre operação, persistência e processamento.
+
+Conclusão
+---------
+O MeetMind deixou de ser um conjunto de scripts acoplados e passou a funcionar como um agente organizado, modular e operacionalmente mais previsível.
